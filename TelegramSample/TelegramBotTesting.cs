@@ -1,6 +1,8 @@
 ﻿using System.Text.Json.Nodes;
+using System.Windows.Forms;
 using Telegram.BotAPI;
 using Telegram.BotAPI.AvailableMethods;
+using Telegram.BotAPI.AvailableMethods.FormattingOptions;
 using Telegram.BotAPI.AvailableTypes;
 using Telegram.BotAPI.GettingUpdates;
 using TelegramSample;
@@ -10,7 +12,7 @@ namespace Sandwich.Sandbox
     public partial class TelegramBotTesting : Form
     {
 
-        private long _chatId;
+        private long? _chatId;
         private bool _enabled = true;
         private BotClient? _botClient;
         TelegramBotSecrets telegramBotSecrets;
@@ -26,7 +28,7 @@ namespace Sandwich.Sandbox
                 throw new Exception("Please use the BotSecrets_example.json file as an example to create a BotSecrets.json file with your secret information and mark it as copy always to ensure it's in the Bin folder.");
             }
             string content = System.IO.File.ReadAllText(fileLocation);
-            telegramBotSecrets = Newtonsoft.Json.JsonConvert.DeserializeObject< TelegramBotSecrets>(content);
+            telegramBotSecrets = Newtonsoft.Json.JsonConvert.DeserializeObject<TelegramBotSecrets>(content);
 
             _botClient = new BotClient(telegramBotSecrets.BotToken);
 
@@ -50,27 +52,32 @@ namespace Sandwich.Sandbox
             var updates = _botClient.GetUpdates();
             while (true)
             {
-                if (updates.Any())
+                try
                 {
-                    foreach (var update in updates)
+                    if (updates.Any())
                     {
-                        try
+                        foreach (var update in updates)
                         {
-                            HandleMessage(update);
+                            try
+                            {
+                                HandleMessage(update);
+                            }
+                            catch (UnauthorizedAccessException ex)
+                            {
+                                if (update?.Message?.Chat?.Id != null)
+                                    _botClient.SendMessage(update.Message.Chat.Id, "Unauthrozed");
+                            }
                         }
-                        catch (UnauthorizedAccessException ex) 
-                        {
-                            if (update?.Message?.Chat?.Id != null)
-                                _botClient.SendMessage(update.Message.Chat.Id, "Unauthrozed");
-                        }
+                        var offset = updates.Last().UpdateId + 1;
+                        updates = _botClient.GetUpdates(offset);
                     }
-                    var offset = updates.Last().UpdateId + 1;
-                    updates = _botClient.GetUpdates(offset);
+                    else
+                    {
+                        updates = _botClient.GetUpdates();
+                    }
                 }
-                else
-                {
-                    updates = _botClient.GetUpdates();
-                }
+                catch (Exception)
+                { }
 
                 await Task.Delay(200);
             }
@@ -78,8 +85,8 @@ namespace Sandwich.Sandbox
 
         public void HandleMessage(Update update)
         {
-            
             string text = string.Empty;
+            string id = string.Empty;
             switch (update.Type)
             {
                 case UpdateType.Unknown:
@@ -87,8 +94,10 @@ namespace Sandwich.Sandbox
                 case UpdateType.Message:
                     if (update.Message.From.Id != telegramBotSecrets.UserId)
                         throw new UnauthorizedAccessException();
+
                     _chatId = update.Message.Chat.Id;
                     text = update.Message.Text;
+                    id = update.Message.MessageId.ToString();
                     break;
                 case UpdateType.EditedMessage:
                     break;
@@ -102,6 +111,7 @@ namespace Sandwich.Sandbox
                     break;
                 case UpdateType.CallbackQuery:
                     text = update.CallbackQuery.Data;
+                    id = update.CallbackQuery.Id;
                     break;
                 case UpdateType.ShippingQuery:
                     break;
@@ -131,6 +141,10 @@ namespace Sandwich.Sandbox
                 txtIncoming.AppendText($"---{update.Type}---");
                 txtIncoming.AppendText(Environment.NewLine);
                 txtIncoming.AppendText(text);
+
+
+                txtMessageIds.AppendText($"{id}:{Environment.NewLine}{text}");
+                txtMessageIds.AppendText($"{Environment.NewLine}{Environment.NewLine}");
             };
 
             if (InvokeRequired)
@@ -143,10 +157,12 @@ namespace Sandwich.Sandbox
         {
             try
             {
+                if (_chatId == null)
+                    throw new Exception("Cannot send messages before we know what the chatID is. Send a message from telegram first.");
                 if (string.IsNullOrWhiteSpace(txtTextToSend.Text))
                     throw new Exception("Cannot send message with blank text");
 
-                if (txtInlineButtons.TextLength > 0 && txtKeyboardButtons.TextLength > 0) 
+                if (txtInlineButtons.TextLength > 0 && txtKeyboardButtons.TextLength > 0)
                 {
                     MessageBox.Show($"You cannot send inline buttons and keyboard buttons in the same message{Environment.NewLine}The inline buttons will be used for this message.");
                 }
@@ -182,14 +198,18 @@ namespace Sandwich.Sandbox
                 }
 
                 // Send message!
-                SendMessageArgs args = new(_chatId, txtTextToSend.Text);
+                SendMessageArgs args = new(_chatId.Value, txtTextToSend.Text);
 
                 if (inlineButtons.Count > 0)
                     args.ReplyMarkup = inlineButtonsMarkup;
                 else if (keyboardButtons.Count > 0)
                     args.ReplyMarkup = new ReplyKeyboardMarkup() { Keyboard = keyboardButtons };
 
-                _botClient.SendMessage(args);
+                args.ParseMode = ParseMode.MarkdownV2;
+
+                var message = _botClient.SendMessage(args);
+                txtMessageIds.AppendText($"{message.MessageId}:{Environment.NewLine}{txtTextToSend.Text}");
+                txtMessageIds.AppendText($"{Environment.NewLine}{Environment.NewLine}");
 
                 if (chkClearInputsOnSend.Checked)
                 {
@@ -197,7 +217,7 @@ namespace Sandwich.Sandbox
                     txtInlineButtons.Clear();
                 }
             }
-            catch(Exception ex) 
+            catch (Exception ex)
             {
                 MessageBox.Show(ex.Message);
             }
@@ -206,6 +226,21 @@ namespace Sandwich.Sandbox
         private void btnClearIncoming_Click(object sender, EventArgs e)
         {
             txtIncoming.Clear();
+        }
+
+        private void btnClearChat_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                if (_chatId == null)
+                    throw new Exception("Cannot send messages before we know what the chatID is. Send a message from telegram first.");
+                var chat = _botClient.GetChat(_chatId.Value);
+                _botClient.SendMessage(_chatId.Value, @"/clearchat");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
         }
     }
 }
