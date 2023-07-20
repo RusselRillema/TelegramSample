@@ -20,7 +20,11 @@ namespace Sandwich.Sandbox
             InitializeComponent();
             string fileLocation = "BotSecrets.json";
             if (!System.IO.File.Exists(fileLocation))
+            {
+                Instructions inst = new();
+                inst.ShowDialog();
                 throw new Exception("Please use the BotSecrets_example.json file as an example to create a BotSecrets.json file with your secret information and mark it as copy always to ensure it's in the Bin folder.");
+            }
             string content = System.IO.File.ReadAllText(fileLocation);
             telegramBotSecrets = Newtonsoft.Json.JsonConvert.DeserializeObject< TelegramBotSecrets>(content);
 
@@ -137,50 +141,65 @@ namespace Sandwich.Sandbox
 
         private void btnSend_Click(object sender, EventArgs e)
         {
-            // Inline Buttons
-            List<List<InlineKeyboardButton>> inlineButtons = new();
-            foreach (var row in txtInlineButtons.Lines)
+            try
             {
-                List<InlineKeyboardButton> rowButtonss = new();
-                foreach (var button in row.Split("|"))
+                if (string.IsNullOrWhiteSpace(txtTextToSend.Text))
+                    throw new Exception("Cannot send message with blank text");
+
+                if (txtInlineButtons.TextLength > 0 && txtKeyboardButtons.TextLength > 0) 
                 {
-                    InlineKeyboardButton urlButton = new InlineKeyboardButton(button);
-                    urlButton.CallbackData = button;
-                    rowButtonss.Add(urlButton);
+                    MessageBox.Show($"You cannot send inline buttons and keyboard buttons in the same message{Environment.NewLine}The inline buttons will be used for this message.");
                 }
-                inlineButtons.Add(rowButtonss);
-            }
-            // Keyboard markup
-            InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
 
-
-
-            List<List<KeyboardButton>> keyboardButtons = new();
-            foreach (var row in txtInlineButtons.Lines)
-            {
-                List<KeyboardButton> rowButtonss = new();
-                foreach (var button in row.Split("|"))
+                // Inline Buttons
+                List<List<InlineKeyboardButton>> inlineButtons = new();
+                foreach (var row in txtInlineButtons.Lines)
                 {
-                    KeyboardButton urlButton = new KeyboardButton(button);
-                    rowButtonss.Add(urlButton);
+                    List<InlineKeyboardButton> rowButtonss = new();
+                    foreach (var button in row.Split("|"))
+                    {
+                        InlineKeyboardButton urlButton = new InlineKeyboardButton(button);
+                        urlButton.CallbackData = button;
+                        rowButtonss.Add(urlButton);
+                    }
+                    inlineButtons.Add(rowButtonss);
                 }
-                keyboardButtons.Add(rowButtonss);
+                // Keyboard markup
+                InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
+
+
+
+                List<List<KeyboardButton>> keyboardButtons = new();
+                foreach (var row in txtInlineButtons.Lines)
+                {
+                    List<KeyboardButton> rowButtonss = new();
+                    foreach (var button in row.Split("|"))
+                    {
+                        KeyboardButton urlButton = new KeyboardButton(button);
+                        rowButtonss.Add(urlButton);
+                    }
+                    keyboardButtons.Add(rowButtonss);
+                }
+
+                // Send message!
+                SendMessageArgs args = new(_chatId, txtTextToSend.Text);
+
+                if (inlineButtons.Count > 0)
+                    args.ReplyMarkup = inlineButtonsMarkup;
+                else if (keyboardButtons.Count > 0)
+                    args.ReplyMarkup = new ReplyKeyboardMarkup() { Keyboard = keyboardButtons };
+
+                _botClient.SendMessage(args);
+
+                if (chkClearInputsOnSend.Checked)
+                {
+                    txtTextToSend.Clear();
+                    txtInlineButtons.Clear();
+                }
             }
-
-            // Send message!
-            SendMessageArgs args = new(_chatId, txtTextToSend.Text);
-
-            if (inlineButtons.Count > 0)
-                args.ReplyMarkup = inlineButtonsMarkup;
-            else if (keyboardButtons.Count > 0)
-                args.ReplyMarkup = new ReplyKeyboardMarkup() { Keyboard = keyboardButtons };
-
-            _botClient.SendMessage(args);
-
-            if (chkClearInputsOnSend.Checked)
+            catch(Exception ex) 
             {
-                txtTextToSend.Clear();
-                txtInlineButtons.Clear();
+                MessageBox.Show(ex.Message);
             }
         }
 
