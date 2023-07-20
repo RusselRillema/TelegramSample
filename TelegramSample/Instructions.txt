@@ -1,0 +1,30 @@
+Start off by making a copy of the "BotSecrets_example.json" file naming it "BotSecrets.json".
+
+Make this new file as Copy Always
+
+Next we need to create a bot in telegram and get your telegram user ID
+
+Open Telegram and search for the "BotFather" bot. 
+Enter the following commands 1 by 1
+
+/start
+
+/newbot
+
+SandwichAccess
+
+<SW userEmail without periods and special characters>SandwichBot
+
+	Note the HTTP API token (long string in red)
+
+	6385947487:AAHLpQpK3N_ieJrTSbhCFu1KB3YOgC1BFKI
+
+Next search for the userinfobot in telegram. Send the bot any message and it will respond with details about your telegram user.
+
+	@TheGids
+	Id: 568528310
+	First: Gideon
+	Last: van der Linde
+	Lang: en
+
+Now update the BotSecrets.json file with your personal bot HTTP API token and your user ID
