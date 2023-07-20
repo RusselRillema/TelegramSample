@@ -9,6 +9,6 @@ namespace TelegramSample
     public class TelegramBotSecrets
     {
         public string BotToken { get; set; }
-        public string UserId { get; set; }
+        public long UserId { get; set; }
     }
 }

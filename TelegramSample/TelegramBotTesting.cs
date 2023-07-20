@@ -1,7 +1,9 @@
-﻿using Telegram.BotAPI;
+﻿using System.Text.Json.Nodes;
+using Telegram.BotAPI;
 using Telegram.BotAPI.AvailableMethods;
 using Telegram.BotAPI.AvailableTypes;
 using Telegram.BotAPI.GettingUpdates;
+using TelegramSample;
 
 namespace Sandwich.Sandbox
 {
@@ -11,14 +13,18 @@ namespace Sandwich.Sandbox
         private long _chatId;
         private bool _enabled = true;
         private BotClient? _botClient;
+        TelegramBotSecrets telegramBotSecrets;
 
         public TelegramBotTesting()
         {
             InitializeComponent();
+            string fileLocation = "BotSecrets.json";
+            if (!System.IO.File.Exists(fileLocation))
+                throw new Exception("Please use the BotSecrets_example.json file as an example to create a BotSecrets.json file with your secret information and mark it as copy always to ensure it's in the Bin folder.");
+            string content = System.IO.File.ReadAllText(fileLocation);
+            telegramBotSecrets = Newtonsoft.Json.JsonConvert.DeserializeObject< TelegramBotSecrets>(content);
 
-
-
-            _botClient = new BotClient(_botToken);
+            _botClient = new BotClient(telegramBotSecrets.BotToken);
 
             Task.Run(() =>
             {
@@ -44,7 +50,15 @@ namespace Sandwich.Sandbox
                 {
                     foreach (var update in updates)
                     {
-                        HandleMessage(update);
+                        try
+                        {
+                            HandleMessage(update);
+                        }
+                        catch (UnauthorizedAccessException ex) 
+                        {
+                            if (update?.Message?.Chat?.Id != null)
+                                _botClient.SendMessage(update.Message.Chat.Id, "Unauthrozed");
+                        }
                     }
                     var offset = updates.Last().UpdateId + 1;
                     updates = _botClient.GetUpdates(offset);
@@ -60,12 +74,15 @@ namespace Sandwich.Sandbox
 
         public void HandleMessage(Update update)
         {
+            
             string text = string.Empty;
             switch (update.Type)
             {
                 case UpdateType.Unknown:
                     break;
                 case UpdateType.Message:
+                    if (update.Message.From.Id != telegramBotSecrets.UserId)
+                        throw new UnauthorizedAccessException();
                     _chatId = update.Message.Chat.Id;
                     text = update.Message.Text;
                     break;
