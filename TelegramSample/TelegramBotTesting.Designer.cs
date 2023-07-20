@@ -39,6 +39,7 @@
             txtKeyboardButtons = new TextBox();
             chkClearInputsOnSend = new CheckBox();
             btnClearIncoming = new Button();
+            txtMessageIds = new TextBox();
             SuspendLayout();
             // 
             // txtIncoming
@@ -146,11 +147,21 @@
             btnClearIncoming.UseVisualStyleBackColor = true;
             btnClearIncoming.Click += btnClearIncoming_Click;
             // 
+            // txtMessageIds
+            // 
+            txtMessageIds.Location = new Point(832, 33);
+            txtMessageIds.Multiline = true;
+            txtMessageIds.Name = "txtMessageIds";
+            txtMessageIds.ReadOnly = true;
+            txtMessageIds.Size = new Size(279, 405);
+            txtMessageIds.TabIndex = 11;
+            // 
             // TelegramBotTesting
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(800, 543);
+            ClientSize = new Size(1136, 543);
+            Controls.Add(txtMessageIds);
             Controls.Add(btnClearIncoming);
             Controls.Add(chkClearInputsOnSend);
             Controls.Add(lblKeyboardButtons);
@@ -181,5 +192,6 @@
         private TextBox txtKeyboardButtons;
         private CheckBox chkClearInputsOnSend;
         private Button btnClearIncoming;
+        private TextBox txtMessageIds;
     }
 }
