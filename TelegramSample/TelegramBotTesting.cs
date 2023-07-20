@@ -1,13 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Forms;
-using Telegram.BotAPI;
+﻿using Telegram.BotAPI;
 using Telegram.BotAPI.AvailableMethods;
 using Telegram.BotAPI.AvailableTypes;
 using Telegram.BotAPI.GettingUpdates;
@@ -16,8 +7,7 @@ namespace Sandwich.Sandbox
 {
     public partial class TelegramBotTesting : Form
     {
-        private string _botToken = "6353338876:AAGVYnchfDJBu185dLAyI7k8Qxq3kqNy1uY"; //This should be configurable to get 1 per client
-        private long _myUserId = 5033078505; //This should be configurable for client to put their userId in
+
         private long _chatId;
         private bool _enabled = true;
         private BotClient? _botClient;
@@ -25,6 +15,8 @@ namespace Sandwich.Sandbox
         public TelegramBotTesting()
         {
             InitializeComponent();
+
+
 
             _botClient = new BotClient(_botToken);
 
@@ -45,7 +37,6 @@ namespace Sandwich.Sandbox
         }
         public async Task Configure()
         {
-            SubWay.Instance?.LoggerSync?.Info("Setting up the telegram service");
             var updates = _botClient.GetUpdates();
             while (true)
             {
