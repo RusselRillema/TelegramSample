@@ -40,6 +40,10 @@
             chkClearInputsOnSend = new CheckBox();
             btnClearIncoming = new Button();
             txtMessageIds = new TextBox();
+            bnDelete = new Button();
+            label1 = new Label();
+            txtMessagId = new TextBox();
+            btnEditButtons = new Button();
             SuspendLayout();
             // 
             // txtIncoming
@@ -156,11 +160,54 @@
             txtMessageIds.Size = new Size(279, 405);
             txtMessageIds.TabIndex = 11;
             // 
+            // bnDelete
+            // 
+            bnDelete.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
+            bnDelete.Location = new Point(965, 444);
+            bnDelete.Name = "bnDelete";
+            bnDelete.Size = new Size(146, 36);
+            bnDelete.TabIndex = 12;
+            bnDelete.Text = "Delete Message";
+            bnDelete.UseVisualStyleBackColor = true;
+            bnDelete.Click += bnDelete_Click;
+            // 
+            // label1
+            // 
+            label1.AutoSize = true;
+            label1.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
+            label1.Location = new Point(832, 493);
+            label1.Name = "label1";
+            label1.Size = new Size(91, 21);
+            label1.TabIndex = 13;
+            label1.Text = "Message Id:";
+            // 
+            // txtMessagId
+            // 
+            txtMessagId.Location = new Point(929, 491);
+            txtMessagId.Name = "txtMessagId";
+            txtMessagId.Size = new Size(182, 23);
+            txtMessagId.TabIndex = 14;
+            // 
+            // btnEditButtons
+            // 
+            btnEditButtons.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
+            btnEditButtons.Location = new Point(832, 444);
+            btnEditButtons.Name = "btnEditButtons";
+            btnEditButtons.Size = new Size(127, 36);
+            btnEditButtons.TabIndex = 15;
+            btnEditButtons.Text = "Edit Buttons";
+            btnEditButtons.UseVisualStyleBackColor = true;
+            btnEditButtons.Click += btnEditButtons_Click;
+            // 
             // TelegramBotTesting
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(1136, 543);
+            ClientSize = new Size(1136, 651);
+            Controls.Add(btnEditButtons);
+            Controls.Add(txtMessagId);
+            Controls.Add(label1);
+            Controls.Add(bnDelete);
             Controls.Add(txtMessageIds);
             Controls.Add(btnClearIncoming);
             Controls.Add(chkClearInputsOnSend);
@@ -193,5 +240,9 @@
         private CheckBox chkClearInputsOnSend;
         private Button btnClearIncoming;
         private TextBox txtMessageIds;
+        private Button bnDelete;
+        private Label label1;
+        private TextBox txtMessagId;
+        private Button btnEditButtons;
     }
 }
