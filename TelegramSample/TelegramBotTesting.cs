@@ -50,7 +50,7 @@ namespace Sandwich.Sandbox
         }
         public async Task Configure()
         {
-            var updates = _botClient.GetUpdates();
+            var updates = await _botClient.GetUpdatesAsync();
             while (true)
             {
                 try
@@ -70,11 +70,11 @@ namespace Sandwich.Sandbox
                             }
                         }
                         var offset = updates.Last().UpdateId + 1;
-                        updates = _botClient.GetUpdates(offset);
+                        updates = await _botClient.GetUpdatesAsync(offset);
                     }
                     else
                     {
-                        updates = _botClient.GetUpdates();
+                        updates = await _botClient.GetUpdatesAsync();
                     }
                 }
                 catch (Exception)
