@@ -31,6 +31,8 @@ namespace TelegramBot
 
         private bool _enabled = true;
 
+        private System.Threading.Timer _pingTimer;
+
         private Dictionary<string, BaseTelegramController> _controllersByType = new();
         private long? _chatId;
         private BotClient _botClient;
@@ -67,7 +69,27 @@ namespace TelegramBot
 
             _botClient = new BotClient(telegramBotSecrets.BotToken);
             InitializeControllers();
+
+            _pingTimer = new System.Threading.Timer(PingTimer_Tick);
+            _pingTimer?.Change(5000, Timeout.Infinite);
+
             Configure();
+        }
+
+        private async void PingTimer_Tick(object state)
+        {
+            try
+            {
+                await RunPings();
+            }
+            catch (Exception ex)
+            {
+                //Log message
+            }
+            finally
+            {
+                _pingTimer?.Change(5000, Timeout.Infinite);
+            }
         }
 
         public async Task Configure()
@@ -100,6 +122,7 @@ namespace TelegramBot
 
                 await Task.Delay(200);
             }
+
         }
 
         private void ShowError(Exception ex)
@@ -303,12 +326,14 @@ namespace TelegramBot
                 var pingMessage = await _botClient.EditMessageTextAsync(args);
                 pingMessageId.PingMessageId = pingMessage.MessageId;
                 var chat = await _botClient.GetChatAsync(chatId);
+                
                 //if (chat.PinnedMessage?.MessageId != pingMessage.MessageId)
                 //{
                     _botClient.UnpinAllChatMessages(chatId);
+                if (await _botClient.UnPinChatMessageAsync(chatId, pingMessage.MessageId))
                     //await _botClient.UnPinChatMessageAsync(chatId, pingMessage.MessageId);
                     await _botClient.PinChatMessageAsync(chatId, pingMessage.MessageId);
-               // }
+                // }
             }
             else
             {
@@ -1190,6 +1215,7 @@ Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ??
         #region buttons
         private const string _posShowActionsCallBackData = "posShowActions";
         private const string _posSummaryViewCallBackData = "posSummaryView";
+        private const string _genAutoPingCallBackData = "genAutoPing";
         #endregion
 
         public SettingsTelegramController(BotClient client) : base(client) { }
@@ -1219,6 +1245,9 @@ Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ??
                     break;
                 case _posSummaryViewCallBackData:
                     settings.Pos_SummaryView = !settings.Pos_SummaryView;
+                    break;
+                case _genAutoPingCallBackData:
+                    settings.Gen_AutoPing = !settings.Gen_AutoPing;
                     break;
                 default:
                     break;
@@ -1269,17 +1298,23 @@ Use the bottons below to toggle your settings";
         {
             var actionsEmoji = TelegramTextHelper.GetBoolEmoji(settings.Pos_ShowActionButtonsPerPosition);
             var summaryEmoji = TelegramTextHelper.GetBoolEmoji(settings.Pos_SummaryView);
+            var pingEmojie = TelegramTextHelper.GetBoolEmoji(settings.Gen_AutoPing);
             var posShowActions = new InlineKeyboardButton($"Show Actions {actionsEmoji}") { CallbackData = new CallbackQueryCallbackData("settings", _posShowActionsCallBackData).ToString() };
             var posSummaryView = new InlineKeyboardButton($"Summary View {summaryEmoji}") { CallbackData = new CallbackQueryCallbackData("settings", _posSummaryViewCallBackData).ToString() };
-
+            var posAutoPing = new InlineKeyboardButton($"Auto Ping {pingEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", _genAutoPingCallBackData).ToString() };
             List<InlineKeyboardButton> row1 = new()
             {
                 posShowActions, posSummaryView
+            };
+            List<InlineKeyboardButton> row2 = new()
+            {
+                posAutoPing
             };
 
             List<List<InlineKeyboardButton>> inlineButtons = new()
             {
                 row1,
+                row2,
                 HomeButtonRow,
             };
 
