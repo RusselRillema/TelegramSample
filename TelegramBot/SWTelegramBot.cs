@@ -137,8 +137,14 @@ namespace TelegramBot
                             if (update?.Message?.From?.Id == null || !telegramBotSecrets.UserIds.Contains(update.Message.From.Id))
                                 throw new UnauthorizedAccessException();
 
-                            if (await RunCommandMessage(update.Message.Chat, update.Message.Text))
+                            await EnsureChatIsConfigured(update.Message.Chat.Id);
+
+                            if (await RunCommandMessage(update.Message.Chat, update.Message.Text, update.Message.MessageId))
+                            {
+                                await _botClient.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
                                 break;
+                            }
+
                             if (!_lastUsedControllerPerChat.TryGetValue(update.Message.Chat.Id, out controller) || _lastUsedControllerPerChat == null)
                                 await _botClient.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
                             else
@@ -149,7 +155,9 @@ namespace TelegramBot
                             if (update?.CallbackQuery?.Data == null || update?.CallbackQuery?.Message?.Chat == null)
                                 break;
 
-                            if (await RunCommandMessage(update.CallbackQuery.Message.Chat, update.CallbackQuery.Data))
+                            EnsureChatIsConfigured(update?.Message?.Chat?.Id);
+
+                            if (await RunCommandMessage(update.CallbackQuery.Message.Chat, update.CallbackQuery.Data, update.CallbackQuery.Message.MessageId))
                                 break;
 
                             CallbackQueryCallbackData data = new(update.CallbackQuery.Data);
@@ -197,13 +205,41 @@ namespace TelegramBot
             });
         }
 
-        private async Task<bool> RunCommandMessage(Chat chat, string command)
+        private async Task EnsureChatIsConfigured(long? id)
+        {
+            if (id == null)
+                return;
+            if (!TelegramSettingsPerChat.TryGetValue(id.Value, out _))
+                TelegramSettingsPerChat.TryAdd(id.Value, new());
+            var commands = await _botClient.GetMyCommandsAsync();
+            var setCommands = new SetMyCommandsArgs();
+            setCommands.Commands = new List<BotCommand>()
+            {
+                new BotCommand() {Command = "home", Description = "Open the home menu"},
+                new BotCommand() {Command = "accounts", Description = "Show loaded accounts"},
+                new BotCommand() {Command = "settings", Description = "Configure chat settings"},
+                new BotCommand() {Command = "trade", Description = "Start configuring a new order"},
+                new BotCommand() {Command = "balances", Description = "View your balances on loaded accounts"},
+                new BotCommand() {Command = "positions", Description = "View your positions on loaded accounts"},
+                new BotCommand() {Command = "exposures", Description = "View your exposures on loaded accounts"},
+                new BotCommand() {Command = "orders", Description = "View your orders on loaded accounts"},
+            };
+            await _botClient.SetMyCommandsAsync(setCommands);
+        }
+
+        private async Task<bool> RunCommandMessage(Chat chat, string command, int messageId)
         {
             command = command.ToLower();
             if (command == "/start")
                 command = "/home";
             if (command.StartsWith("/"))
                 command = command.Remove(0, 1);
+
+            if (command == "ping")
+            {
+                await RunPing(chat.Id, messageId);
+                return true;
+            }
 
             if (!command.EndsWith("telegramcontroller"))
                 command += "telegramcontroller";
@@ -236,6 +272,60 @@ namespace TelegramBot
         {
             var message = await _botClient.SendMessageAsync(args);
             MessageEvent?.Invoke(this, new("Sending message", args.Text, message.MessageId.ToString(), _chatId));
+        }
+
+        private async Task RunPings()
+        {
+            List<Task> pings = new List<Task>();
+            foreach (var item in TelegramSettingsPerChat.ToList())
+            {
+                if (item.Value.Gen_AutoPing)
+                    pings.Add(RunPing(item.Key, item.Value, null));
+            }
+            //TODO: Add aggregate exception here
+            await Task.WhenAll(pings);
+        }
+        private async Task RunPing(long chatId, int? pingRequestMessageId)
+        {
+            if (TelegramSettingsPerChat.TryGetValue(chatId, out var settings))
+                await RunPing(chatId, settings, pingRequestMessageId);
+        }
+        private async Task RunPing(long chatId, TelegramSettings pingMessageId, int? pingRequestMessageId)
+        {
+            var message = CreatePingMessage();
+            if (pingMessageId.PingMessageId.HasValue)
+            {
+                EditMessageTextArgs args = new(message)
+                {
+                    ChatId = chatId,
+                    MessageId = pingMessageId.PingMessageId.Value
+                };
+                var pingMessage = await _botClient.EditMessageTextAsync(args);
+                pingMessageId.PingMessageId = pingMessage.MessageId;
+                var chat = await _botClient.GetChatAsync(chatId);
+                //if (chat.PinnedMessage?.MessageId != pingMessage.MessageId)
+                //{
+                    _botClient.UnpinAllChatMessages(chatId);
+                    //await _botClient.UnPinChatMessageAsync(chatId, pingMessage.MessageId);
+                    await _botClient.PinChatMessageAsync(chatId, pingMessage.MessageId);
+               // }
+            }
+            else
+            {
+                var pingMessage = await _botClient.SendMessageAsync(chatId, message);
+                pingMessageId.PingMessageId = pingMessage.MessageId;
+                await _botClient.PinChatMessageAsync(chatId, pingMessage.MessageId);
+            }
+
+            if (pingRequestMessageId.HasValue) 
+            {
+                await _botClient.DeleteMessageAsync(chatId, pingRequestMessageId.Value);
+            }
+        }
+
+        private string CreatePingMessage()
+        {
+            return $"Last: {DateTime.UtcNow.TimeOfDay} UPnL: $12k";
         }
     }
 
@@ -677,7 +767,7 @@ View breakdown by:";
             if (!chatTrades.TryGetValue(update.Message.MessageId, out TelegramTradePoco tradePoco))
                 return;
 
-            var message = await MoveMessageToBottomIfNecessary(update);
+            var message = await MoveMessageToBottomIfNecessary(update, tradePoco);
 
             UpdateLastUsedTradePocoPerChatId(message.Chat.Id, tradePoco);
 
@@ -691,7 +781,7 @@ View breakdown by:";
                 tradePoco.SymbolSW = callbackData.SymbolSW;
                 tradePoco.SymbolExchange = TelegramDataProvider.GetSymbolExchange(tradePoco.AccountId, tradePoco.SymbolSW);
 
-                string messageText = GetBaseTelegramTradeMessageText(tradePoco);
+                string messageText = GetBaseTradeMessageText(tradePoco);
                 messageText += $"{Environment.NewLine}Select Quantity:";
                 InlineKeyboardMarkup inlineButtonsMarkup = CreateQuantityInputButtons();
 
@@ -715,7 +805,7 @@ View breakdown by:";
 
                 tradePoco.Quantity = qty;
 
-                string messageText = GetBaseTelegramTradeMessageText(tradePoco);
+                string messageText = GetBaseTradeMessageText(tradePoco);
                 messageText += $"{Environment.NewLine}Select Price:";
                 InlineKeyboardMarkup inlineButtonsMarkup = GetPriceInputButtons();
 
@@ -733,7 +823,7 @@ View breakdown by:";
             }
         }
 
-        private async Task<Telegram.BotAPI.AvailableTypes.Message> MoveMessageToBottomIfNecessary(CallbackQuery update)
+        private async Task<Telegram.BotAPI.AvailableTypes.Message> MoveMessageToBottomIfNecessary(CallbackQuery update, TelegramTradePoco tradePoco)
         {
             if (!SWTelegramBot.IsLastUsedControllerForChat(update.Message.Chat.Id, this))
             {
@@ -743,7 +833,7 @@ View breakdown by:";
                 args.ParseMode = ParseMode.MarkdownV2;
                 args.ReplyMarkup = update.Message.ReplyMarkup;
                 var message = await Client.SendMessageAsync(args);
-
+                tradePoco.MainMessageId = message.MessageId;
                 try
                 {
                     await Client.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
@@ -857,7 +947,7 @@ View breakdown by:";
             {
                 tradePoco.Quantity = decimalValue;
 
-                string messageText = GetBaseTelegramTradeMessageText(tradePoco);
+                string messageText = GetBaseTradeMessageText(tradePoco);
                 messageText += $"{Environment.NewLine}Select Price:";
                 InlineKeyboardMarkup inlineButtonsMarkup = GetPriceInputButtons();
 
@@ -876,7 +966,7 @@ View breakdown by:";
             else if (tradePoco.Price == null)
             {
                 tradePoco.Price = decimalValue;
-                string messageText = GetBaseTelegramTradeMessageText(tradePoco);
+                string messageText = GetBaseTradeMessageText(tradePoco);
                 messageText += $"{Environment.NewLine}Confirm Trade:";
 
 
@@ -985,7 +1075,7 @@ View breakdown by:";
                 }
             }
 
-            string messageText = GetBaseTelegramTradeMessageText(tradePoco);
+            string messageText = GetBaseTradeMessageText(tradePoco);
             messageText += $"{Environment.NewLine}Select Instrument:";
 
             var favourites = TelegramDataProvider.GetFavourites();
@@ -1055,7 +1145,7 @@ View breakdown by:";
             }
         }
 
-        private string GetBaseTelegramTradeMessageText(TelegramTradePoco tradePoco)
+        private string GetBaseTradeMessageText(TelegramTradePoco tradePoco)
         {
             return
 $@"*Trade*
@@ -1203,6 +1293,10 @@ Use the bottons below to toggle your settings";
     #region helper classes
     public class TelegramSettings
     {
+        #region general
+        public bool Gen_AutoPing { get; set; }
+        public int? PingMessageId { get; set; }
+        #endregion
         #region positions
         public bool Pos_ShowActionButtonsPerPosition { get; set; }
         public bool Pos_SummaryView { get; set; }
