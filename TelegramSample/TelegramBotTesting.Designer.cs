@@ -44,6 +44,9 @@
             label1 = new Label();
             txtMessagId = new TextBox();
             btnEditButtons = new Button();
+            lblChatId = new Label();
+            txtReplyToMessageId = new TextBox();
+            label2 = new Label();
             SuspendLayout();
             // 
             // txtIncoming
@@ -67,16 +70,16 @@
             // 
             // txtTextToSend
             // 
-            txtTextToSend.Location = new Point(320, 33);
+            txtTextToSend.Location = new Point(321, 75);
             txtTextToSend.Multiline = true;
             txtTextToSend.Name = "txtTextToSend";
-            txtTextToSend.Size = new Size(468, 200);
+            txtTextToSend.Size = new Size(467, 200);
             txtTextToSend.TabIndex = 2;
             // 
             // btnSend
             // 
             btnSend.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
-            btnSend.Location = new Point(320, 402);
+            btnSend.Location = new Point(321, 444);
             btnSend.Name = "btnSend";
             btnSend.Size = new Size(467, 36);
             btnSend.TabIndex = 3;
@@ -86,7 +89,7 @@
             // 
             // txtInlineButtons
             // 
-            txtInlineButtons.Location = new Point(320, 260);
+            txtInlineButtons.Location = new Point(321, 302);
             txtInlineButtons.Multiline = true;
             txtInlineButtons.Name = "txtInlineButtons";
             txtInlineButtons.Size = new Size(219, 136);
@@ -96,7 +99,7 @@
             // 
             lblText.AutoSize = true;
             lblText.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
-            lblText.Location = new Point(320, 9);
+            lblText.Location = new Point(321, 51);
             lblText.Name = "lblText";
             lblText.Size = new Size(91, 21);
             lblText.TabIndex = 5;
@@ -106,7 +109,7 @@
             // 
             lblInlineButtons.AutoSize = true;
             lblInlineButtons.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
-            lblInlineButtons.Location = new Point(320, 236);
+            lblInlineButtons.Location = new Point(321, 278);
             lblInlineButtons.Name = "lblInlineButtons";
             lblInlineButtons.Size = new Size(160, 21);
             lblInlineButtons.TabIndex = 6;
@@ -116,7 +119,7 @@
             // 
             lblKeyboardButtons.AutoSize = true;
             lblKeyboardButtons.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
-            lblKeyboardButtons.Location = new Point(568, 236);
+            lblKeyboardButtons.Location = new Point(569, 278);
             lblKeyboardButtons.Name = "lblKeyboardButtons";
             lblKeyboardButtons.Size = new Size(188, 21);
             lblKeyboardButtons.TabIndex = 8;
@@ -124,7 +127,7 @@
             // 
             // txtKeyboardButtons
             // 
-            txtKeyboardButtons.Location = new Point(568, 260);
+            txtKeyboardButtons.Location = new Point(569, 302);
             txtKeyboardButtons.Multiline = true;
             txtKeyboardButtons.Name = "txtKeyboardButtons";
             txtKeyboardButtons.Size = new Size(219, 136);
@@ -133,7 +136,7 @@
             // chkClearInputsOnSend
             // 
             chkClearInputsOnSend.AutoSize = true;
-            chkClearInputsOnSend.Location = new Point(320, 444);
+            chkClearInputsOnSend.Location = new Point(321, 486);
             chkClearInputsOnSend.Name = "chkClearInputsOnSend";
             chkClearInputsOnSend.Size = new Size(135, 19);
             chkClearInputsOnSend.TabIndex = 9;
@@ -199,11 +202,41 @@
             btnEditButtons.UseVisualStyleBackColor = true;
             btnEditButtons.Click += btnEditButtons_Click;
             // 
+            // lblChatId
+            // 
+            lblChatId.AutoSize = true;
+            lblChatId.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
+            lblChatId.Location = new Point(832, 9);
+            lblChatId.Name = "lblChatId";
+            lblChatId.Size = new Size(62, 21);
+            lblChatId.TabIndex = 16;
+            lblChatId.Text = "ChatId: ";
+            // 
+            // txtReplyToMessageId
+            // 
+            txtReplyToMessageId.Location = new Point(479, 32);
+            txtReplyToMessageId.Name = "txtReplyToMessageId";
+            txtReplyToMessageId.Size = new Size(309, 23);
+            txtReplyToMessageId.TabIndex = 18;
+            // 
+            // label2
+            // 
+            label2.AutoSize = true;
+            label2.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
+            label2.Location = new Point(321, 30);
+            label2.Name = "label2";
+            label2.Size = new Size(152, 21);
+            label2.TabIndex = 17;
+            label2.Text = "Reply to message Id:";
+            // 
             // TelegramBotTesting
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
             ClientSize = new Size(1136, 651);
+            Controls.Add(txtReplyToMessageId);
+            Controls.Add(label2);
+            Controls.Add(lblChatId);
             Controls.Add(btnEditButtons);
             Controls.Add(txtMessagId);
             Controls.Add(label1);
@@ -244,5 +277,8 @@
         private Label label1;
         private TextBox txtMessagId;
         private Button btnEditButtons;
+        private Label lblChatId;
+        private TextBox txtReplyToMessageId;
+        private Label label2;
     }
 }

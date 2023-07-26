@@ -48,9 +48,11 @@ namespace Sandwich.Sandbox
                 }
             });
         }
+
         public async Task Configure()
         {
-            var updates = _botClient.GetUpdates();
+            await Task.Delay(500);
+            var updates = await _botClient.GetUpdatesAsync();
             while (true)
             {
                 try
@@ -66,15 +68,15 @@ namespace Sandwich.Sandbox
                             catch (UnauthorizedAccessException ex)
                             {
                                 if (update?.Message?.Chat?.Id != null)
-                                    _botClient.SendMessage(update.Message.Chat.Id, "Unauthrozed");
+                                    await _botClient.SendMessageAsync(update.Message.Chat.Id, "Unauthrozed");
                             }
                         }
                         var offset = updates.Last().UpdateId + 1;
-                        updates = _botClient.GetUpdates(offset);
+                        updates = await _botClient.GetUpdatesAsync(offset);
                     }
                     else
                     {
-                        updates = _botClient.GetUpdates();
+                        updates = await _botClient.GetUpdatesAsync();
                     }
                 }
                 catch (Exception)
@@ -146,6 +148,8 @@ namespace Sandwich.Sandbox
 
                 txtMessageIds.AppendText($"{id}:{Environment.NewLine}{text}");
                 txtMessageIds.AppendText($"{Environment.NewLine}{Environment.NewLine}");
+
+                lblChatId.Text = $"ChatId: {_chatId?.ToString() ?? ""}";
             };
 
             if (InvokeRequired)
@@ -168,6 +172,7 @@ namespace Sandwich.Sandbox
                     MessageBox.Show($"You cannot send inline buttons and keyboard buttons in the same message{Environment.NewLine}The inline buttons will be used for this message.");
                 }
 
+
                 // Inline Buttons
                 List<List<InlineKeyboardButton>> inlineButtons = new();
                 foreach (var row in txtInlineButtons.Lines)
@@ -175,17 +180,18 @@ namespace Sandwich.Sandbox
                     List<InlineKeyboardButton> rowButtonss = new();
                     foreach (var button in row.Split("|"))
                     {
-                        InlineKeyboardButton urlButton = new InlineKeyboardButton(button);
-                        urlButton.CallbackData = button;
+                        //InlineKeyboardButton urlButton = new InlineKeyboardButton(button);
+                        var urlButton = InlineButtonBuilder.SetSwitchInlineQueryCurrentChat(button, button);
+                        //var urlButton = InlineButtonBuilder.SetCallbackData(button, button);
+                        //urlButton.CallbackData = button;
                         rowButtonss.Add(urlButton);
                     }
                     inlineButtons.Add(rowButtonss);
                 }
                 InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
-
                 // Keyboard markup
                 List<List<KeyboardButton>> keyboardButtons = new();
-                foreach (var row in txtInlineButtons.Lines)
+                foreach (var row in txtKeyboardButtons.Lines)
                 {
                     List<KeyboardButton> rowButtonss = new();
                     foreach (var button in row.Split("|"))
@@ -199,10 +205,13 @@ namespace Sandwich.Sandbox
                 // Send message!
                 SendMessageArgs args = new(_chatId.Value, txtTextToSend.Text);
 
+                if (!string.IsNullOrWhiteSpace(txtReplyToMessageId.Text) && int.TryParse(txtReplyToMessageId.Text, out int replyToMessageId))
+                    args.ReplyToMessageId = replyToMessageId;
+
                 if (inlineButtons.Count > 0)
                     args.ReplyMarkup = inlineButtonsMarkup;
                 else if (keyboardButtons.Count > 0)
-                    args.ReplyMarkup = new ReplyKeyboardMarkup() { Keyboard = keyboardButtons };
+                    args.ReplyMarkup = new ReplyKeyboardMarkup() { Keyboard = keyboardButtons, InputFieldPlaceholder = "Test" };
 
                 args.ParseMode = ParseMode.MarkdownV2;
                 //args.ParseMode = ParseMode.HTML;
@@ -226,21 +235,6 @@ namespace Sandwich.Sandbox
         private void btnClearIncoming_Click(object sender, EventArgs e)
         {
             txtIncoming.Clear();
-        }
-
-        private void btnClearChat_Click(object sender, EventArgs e)
-        {
-            try
-            {
-                if (_chatId == null)
-                    throw new Exception("Cannot send messages before we know what the chatID is. Send a message from telegram first.");
-                var chat = _botClient.GetChat(_chatId.Value);
-                _botClient.SendMessage(_chatId.Value, @"/clearchat");
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.Message);
-            }
         }
 
         private void bnDelete_Click(object sender, EventArgs e)
