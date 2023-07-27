@@ -302,7 +302,7 @@ namespace TelegramBot
             List<Task> pings = new List<Task>();
             foreach (var item in TelegramSettingsPerChat.ToList())
             {
-                if (item.Value.Gen_AutoPing)
+                if (item.Value.Ping_AutoPing)
                     pings.Add(RunPing(item.Key, item.Value, null));
             }
             //TODO: Add aggregate exception here
@@ -313,32 +313,43 @@ namespace TelegramBot
             if (TelegramSettingsPerChat.TryGetValue(chatId, out var settings))
                 await RunPing(chatId, settings, pingRequestMessageId);
         }
-        private async Task RunPing(long chatId, TelegramSettings pingMessageId, int? pingRequestMessageId)
+        private async Task RunPing(long chatId, TelegramSettings chatSettings, int? pingRequestMessageId)
         {
-            var message = CreatePingMessage();
-            if (pingMessageId.PingMessageId.HasValue)
+            var message = CreatePingMessage(chatSettings.Ping_MetricToShow);
+            bool sendNew = false;
+            if (chatSettings.PingMessageId.HasValue)
             {
                 EditMessageTextArgs args = new(message)
                 {
                     ChatId = chatId,
-                    MessageId = pingMessageId.PingMessageId.Value
+                    MessageId = chatSettings.PingMessageId.Value
                 };
                 var pingMessage = await _botClient.EditMessageTextAsync(args);
-                pingMessageId.PingMessageId = pingMessage.MessageId;
+                //pingMessage = await _botClient.EditMessageReplyMarkupAsync(new() { ChatId = chatId, MessageId = pingMessageId.PingMessageId.Value });
+                chatSettings.PingMessageId = pingMessage.MessageId;
+
                 var chat = await _botClient.GetChatAsync(chatId);
-                
-                //if (chat.PinnedMessage?.MessageId != pingMessage.MessageId)
-                //{
-                    _botClient.UnpinAllChatMessages(chatId);
-                if (await _botClient.UnPinChatMessageAsync(chatId, pingMessage.MessageId))
-                    //await _botClient.UnPinChatMessageAsync(chatId, pingMessage.MessageId);
-                    await _botClient.PinChatMessageAsync(chatId, pingMessage.MessageId);
-                // }
+                if (chat.PinnedMessage?.MessageId != pingMessage.MessageId || pingRequestMessageId.HasValue)
+                {
+                    try
+                    {
+                        await _botClient.UnPinChatMessageAsync(chatId, pingMessage.MessageId);
+                        await _botClient.DeleteMessageAsync(chatId, pingMessage.MessageId);
+                    }
+                    catch (Exception ex)
+                    {
+                        //Log
+                    }
+                    sendNew = true;
+                }
             }
-            else
+            
+            if (!chatSettings.PingMessageId.HasValue || sendNew)
             {
+                
                 var pingMessage = await _botClient.SendMessageAsync(chatId, message);
-                pingMessageId.PingMessageId = pingMessage.MessageId;
+                chatSettings.PingMessageId = pingMessage.MessageId;
+                _botClient.UnpinAllChatMessages(chatId);
                 await _botClient.PinChatMessageAsync(chatId, pingMessage.MessageId);
             }
 
@@ -348,9 +359,26 @@ namespace TelegramBot
             }
         }
 
-        private string CreatePingMessage()
+        private string CreatePingMessage(PingMetric ping_MetricToShow)
         {
-            return $"Last: {DateTime.UtcNow.TimeOfDay} UPnL: $12k";
+            string metric = "";
+            switch (ping_MetricToShow)
+            {
+                case PingMetric.None:
+                    break;
+                case PingMetric.UPnL:
+                    metric = "UPnL: $12k";
+                    break;
+                case PingMetric.NAV:
+                    metric = "NAV: $14M";
+                    break;
+                case PingMetric.ClosestToLiq:
+                    metric = "Liq%: 9.7";
+                    break;
+                default:
+                    break;
+            }
+            return $"Last: {DateTime.UtcNow.TimeOfDay.ToString(@"hh\:mm\:ss")} {metric}";
         }
     }
 
@@ -748,6 +776,19 @@ View breakdown by:";
                     return AccountId == null;
                 }
             }
+
+            public void Reset()
+            {
+                AccountId = null;
+                AccountName = null;
+                SymbolSW = null;
+                SymbolExchange = null;
+                OrderType = null;
+                Price = null;
+                Quantity = null;
+                QtyPricePromptMessageId = null;
+                IsWaitingForUserInput = false;
+            }
         }
 
         public class TradeInstrumentSelectionCallBackData
@@ -779,7 +820,7 @@ View breakdown by:";
         ConcurrentDictionary<long, TelegramTradePoco> _chatIdToLastUsedTradePoco = new();
 
         public TradeTelegramController(BotClient client) : base(client) {}
-
+        #region BaseTelegramController
         public override async Task HandleCallbackQuery(CallbackQuery update, string path, CallbackQueryCallbackData data)
         {
             if (update?.Message?.Chat?.Id == null)
@@ -805,13 +846,7 @@ View breakdown by:";
                 tradePoco.AccountName = TelegramDataProvider.GetAccountName(tradePoco.AccountId);
                 tradePoco.SymbolSW = callbackData.SymbolSW;
                 tradePoco.SymbolExchange = TelegramDataProvider.GetSymbolExchange(tradePoco.AccountId, tradePoco.SymbolSW);
-
-                string messageText = GetBaseTradeMessageText(tradePoco);
-                messageText += $"{Environment.NewLine}Select Quantity:";
-                InlineKeyboardMarkup inlineButtonsMarkup = CreateQuantityInputButtons();
-
-                await UpdateMessage(message, messageText, inlineButtonsMarkup);
-
+                await UpdateMessageToQuantitySelection(data, tradePoco, message);
                 return;
             }
 
@@ -827,17 +862,8 @@ View breakdown by:";
 
                 if (!decimal.TryParse(data.Data, out var qty))
                     return;
-
                 tradePoco.Quantity = qty;
-
-                string messageText = GetBaseTradeMessageText(tradePoco);
-                messageText += $"{Environment.NewLine}Select Price:";
-                InlineKeyboardMarkup inlineButtonsMarkup = GetPriceInputButtons();
-
-                //EditMessageTextArgs textArgs = CreateEnterPriceEditMessage(update.Message.Chat.Id, tradePoco.MainMessageId, tradePoco);
-                //await Client.EditMessageTextAsync(textArgs);
-
-                await UpdateMessage(message, messageText, inlineButtonsMarkup);
+                await UpdateMessageToPriceSelection(tradePoco, message);
 
                 return;
             }
@@ -846,103 +872,24 @@ View breakdown by:";
             {
                 await Client.SendMessageAsync(update.Message.Chat.Id, "Not implemented yet");
             }
-        }
 
-        private async Task<Telegram.BotAPI.AvailableTypes.Message> MoveMessageToBottomIfNecessary(CallbackQuery update, TelegramTradePoco tradePoco)
-        {
-            if (!SWTelegramBot.IsLastUsedControllerForChat(update.Message.Chat.Id, this))
+            if (path == "trade/back")
             {
-                //await TryDeleteMessageAndRemoveFromDictionary(update.Message.Chat.Id, update.Message.MessageId);
-                //await Client.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
-                SendMessageArgs args = new(update.Message.Chat.Id, TelegramTextHelper.EscapeSpecialCharacters(update.Message.Text));
-                args.ParseMode = ParseMode.MarkdownV2;
-                args.ReplyMarkup = update.Message.ReplyMarkup;
-                var message = await Client.SendMessageAsync(args);
-                tradePoco.MainMessageId = message.MessageId;
-                try
+                if (data.Data == "qty")
                 {
-                    await Client.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
+                    await RunInitCommand(message.Chat);
                 }
-                catch (Exception ex)
+                else if (data.Data == "price")
                 {
-                    //Log
+                    tradePoco.Quantity = null;
+                    await UpdateMessageToQuantitySelection(data, tradePoco, message);
                 }
-                if (_chatIdToMessageIdToTradePoco.TryGetValue(update.Message.Chat.Id, out var messageToTradePoco))
+                else if (data.Data == "confirm")
                 {
-                    if (messageToTradePoco.TryRemove(update.Message.MessageId, out var poco))
-                        messageToTradePoco.TryAdd(message.MessageId, poco);
+                    tradePoco.Price = null;
+                    await UpdateMessageToPriceSelection(tradePoco, message);
                 }
-                return message;
             }
-            return update.Message;
-        }
-
-        private static InlineKeyboardMarkup CreateQuantityInputButtons()
-        {
-            List<InlineKeyboardButton> row1 = new()
-                {
-                    new("100") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "100").ToString()},
-                    new("1,000") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "1000").ToString()}
-                };
-
-            List<InlineKeyboardButton> row2 = new()
-                {
-                    new("10,000") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "10000").ToString()},
-                    new("50,000") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "50000").ToString()}
-                };
-
-            List<InlineKeyboardButton> row3 = new()
-                {
-                    new("100,000") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "100000").ToString()},
-                    new("500,000") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "500000").ToString()}
-                };
-
-            List<InlineKeyboardButton> row4 = new()
-                {
-                    new("Custom") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "custom").ToString()},
-                };
-
-
-            List<List<InlineKeyboardButton>> inlineButtons = new()
-                {
-                    row1,
-                    row2,
-                    row3,
-                    row4,
-                    HomeButtonRow
-                };
-
-
-            InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
-            return inlineButtonsMarkup;
-        }
-
-        private async Task UpdateMessage(Telegram.BotAPI.AvailableTypes.Message message, string? messageText, InlineKeyboardMarkup inlineButtonsMarkup)
-        {
-            
-            
-                if (string.IsNullOrWhiteSpace(messageText))
-                {
-                    EditMessageReplyMarkup replyMarkup = new EditMessageReplyMarkup()
-                    {
-                        ChatId = message.Chat.Id,
-                        MessageId = message.MessageId,
-                        ReplyMarkup = inlineButtonsMarkup
-                    };
-                    await Client.EditMessageReplyMarkupAsync(replyMarkup);
-                }
-                else
-                {
-                    EditMessageTextArgs textArgs = new(messageText)
-                    {
-                        ChatId = message.Chat.Id,
-                        MessageId = message.MessageId,
-                        ReplyMarkup = inlineButtonsMarkup,
-                        ParseMode = ParseMode.MarkdownV2,
-                    };
-
-                    await Client.EditMessageTextAsync(textArgs);
-                }
         }
 
         public override async Task<bool> HandleMessage(Telegram.BotAPI.AvailableTypes.Message message)
@@ -1023,67 +970,6 @@ View breakdown by:";
             return true;
         }
 
-        private static InlineKeyboardMarkup GetPriceInputButtons()
-        {
-            List<InlineKeyboardButton> row1 = new()
-                {
-                    new("Market") {CallbackData =  new CallbackQueryCallbackData("trade/price", "market").ToString()},
-                };
-
-            List<InlineKeyboardButton> row2 = new()
-                {
-                    new("Best Bid") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bb").ToString()},
-                    new("Best Offer") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bo").ToString()}
-                };
-
-            List<InlineKeyboardButton> row3 = new()
-                {
-                    new("Best Bid - 5") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bb-5").ToString()},
-                    new("Best Offer + 5") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bo+5").ToString()}
-                };
-
-            List<InlineKeyboardButton> row4 = new()
-                {
-                    new("Best Bid - 10") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bb-10").ToString()},
-                    new("Best Offer + 10") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bo+10").ToString()}
-                };
-
-            List<InlineKeyboardButton> row5 = new()
-                {
-                    new("Best Bid - 15") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bb-15").ToString()},
-                    new("Best Offer + 15") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bo+15").ToString()}
-                };
-
-            List<InlineKeyboardButton> row6 = new()
-                {
-                    new("Custom") {CallbackData =  new CallbackQueryCallbackData("trade/price", "custom").ToString()},
-                };
-
-
-            List<List<InlineKeyboardButton>> inlineButtons = new()
-                {
-                    row1,
-                    row2,
-                    row3,
-                    row4,
-                    row5,
-                    row6,
-                    HomeButtonRow
-                };
-
-
-            InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
-            return inlineButtonsMarkup;
-        }
-
-        private void UpdateLastUsedTradePocoPerChatId(long chatId, TelegramTradePoco tradePoco)
-        {
-            if (_chatIdToLastUsedTradePoco.TryGetValue(chatId, out var oldPoco))
-                _chatIdToLastUsedTradePoco.TryUpdate(chatId, tradePoco, oldPoco);
-            else
-                _chatIdToLastUsedTradePoco.TryAdd(chatId, tradePoco);
-        }
-
         public override async Task RunInitCommand(Chat chat)
         {
             TelegramTradePoco tradePoco = new();
@@ -1142,6 +1028,7 @@ View breakdown by:";
                 }
             }
 
+            inlineButtons.Add(HomeButtonRow);
 
             InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
             SendMessageArgs args = new(chat.Id, messageText);
@@ -1152,7 +1039,192 @@ View breakdown by:";
             tradePoco.MainMessageId = message.MessageId;
             UpdateLastUsedTradePocoPerChatId(chat.Id, tradePoco);
         }
+        #endregion
+        private async Task UpdateMessageToQuantitySelection(CallbackQueryCallbackData data, TelegramTradePoco tradePoco, Telegram.BotAPI.AvailableTypes.Message message)
+        {
 
+            string messageText = GetBaseTradeMessageText(tradePoco);
+            messageText += $"{Environment.NewLine}Select Quantity:";
+            InlineKeyboardMarkup inlineButtonsMarkup = CreateQuantityInputButtons();
+
+            await UpdateMessage(message, messageText, inlineButtonsMarkup);
+        }
+
+        private static InlineKeyboardMarkup CreateQuantityInputButtons()
+        {
+            List<InlineKeyboardButton> row1 = new()
+                {
+                    new("100") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "100").ToString()},
+                    new("1,000") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "1000").ToString()}
+                };
+
+            List<InlineKeyboardButton> row2 = new()
+                {
+                    new("10,000") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "10000").ToString()},
+                    new("50,000") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "50000").ToString()}
+                };
+
+            List<InlineKeyboardButton> row3 = new()
+                {
+                    new("100,000") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "100000").ToString()},
+                    new("500,000") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "500000").ToString()}
+                };
+
+            List<InlineKeyboardButton> row4 = new()
+                {
+                    new("Custom") {CallbackData =  new CallbackQueryCallbackData("trade/qty", "custom").ToString()},
+                };
+
+            List<List<InlineKeyboardButton>> inlineButtons = new()
+                {
+                    row1,
+                    row2,
+                    row3,
+                    row4,
+                    CreateBackButtonRow("qty"),
+                    HomeButtonRow
+                };
+
+
+            InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
+            return inlineButtonsMarkup;
+        }
+        private async Task UpdateMessageToPriceSelection(TelegramTradePoco tradePoco, Telegram.BotAPI.AvailableTypes.Message message)
+        {
+            string messageText = GetBaseTradeMessageText(tradePoco);
+            messageText += $"{Environment.NewLine}Select Price:";
+            InlineKeyboardMarkup inlineButtonsMarkup = GetPriceInputButtons();
+
+            //EditMessageTextArgs textArgs = CreateEnterPriceEditMessage(update.Message.Chat.Id, tradePoco.MainMessageId, tradePoco);
+            //await Client.EditMessageTextAsync(textArgs);
+
+            await UpdateMessage(message, messageText, inlineButtonsMarkup);
+        }
+
+        private async Task<Telegram.BotAPI.AvailableTypes.Message> MoveMessageToBottomIfNecessary(CallbackQuery update, TelegramTradePoco tradePoco)
+        {
+            if (!SWTelegramBot.IsLastUsedControllerForChat(update.Message.Chat.Id, this))
+            {
+                //await TryDeleteMessageAndRemoveFromDictionary(update.Message.Chat.Id, update.Message.MessageId);
+                //await Client.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
+                SendMessageArgs args = new(update.Message.Chat.Id, TelegramTextHelper.EscapeSpecialCharacters(update.Message.Text));
+                args.ParseMode = ParseMode.MarkdownV2;
+                args.ReplyMarkup = update.Message.ReplyMarkup;
+                var message = await Client.SendMessageAsync(args);
+                tradePoco.MainMessageId = message.MessageId;
+                try
+                {
+                    await Client.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
+                }
+                catch (Exception ex)
+                {
+                    //Log
+                }
+                if (_chatIdToMessageIdToTradePoco.TryGetValue(update.Message.Chat.Id, out var messageToTradePoco))
+                {
+                    if (messageToTradePoco.TryRemove(update.Message.MessageId, out var poco))
+                        messageToTradePoco.TryAdd(message.MessageId, poco);
+                }
+                return message;
+            }
+            return update.Message;
+        }
+
+        private static List<InlineKeyboardButton> CreateBackButtonRow(string backData)
+        {
+            return new()
+                {
+                    new("Back") {CallbackData =  new CallbackQueryCallbackData("trade/back", backData).ToString()},
+                };
+        }
+
+        private async Task UpdateMessage(Telegram.BotAPI.AvailableTypes.Message message, string? messageText, InlineKeyboardMarkup inlineButtonsMarkup)
+        {
+            if (string.IsNullOrWhiteSpace(messageText))
+            {
+                EditMessageReplyMarkup replyMarkup = new EditMessageReplyMarkup()
+                {
+                    ChatId = message.Chat.Id,
+                    MessageId = message.MessageId,
+                    ReplyMarkup = inlineButtonsMarkup
+                };
+                await Client.EditMessageReplyMarkupAsync(replyMarkup);
+            }
+            else
+                {
+                    EditMessageTextArgs textArgs = new(messageText)
+                    {
+                        ChatId = message.Chat.Id,
+                        MessageId = message.MessageId,
+                        ReplyMarkup = inlineButtonsMarkup,
+                        ParseMode = ParseMode.MarkdownV2,
+                    };
+
+                    await Client.EditMessageTextAsync(textArgs);
+                }
+        }
+
+        private static InlineKeyboardMarkup GetPriceInputButtons()
+        {
+            List<InlineKeyboardButton> row1 = new()
+                {
+                    new("Market") {CallbackData =  new CallbackQueryCallbackData("trade/price", "market").ToString()},
+                };
+
+            List<InlineKeyboardButton> row2 = new()
+                {
+                    new("Best Bid") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bb").ToString()},
+                    new("Best Offer") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bo").ToString()}
+                };
+
+            List<InlineKeyboardButton> row3 = new()
+                {
+                    new("Best Bid - 5") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bb-5").ToString()},
+                    new("Best Offer + 5") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bo+5").ToString()}
+                };
+
+            List<InlineKeyboardButton> row4 = new()
+                {
+                    new("Best Bid - 10") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bb-10").ToString()},
+                    new("Best Offer + 10") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bo+10").ToString()}
+                };
+
+            List<InlineKeyboardButton> row5 = new()
+                {
+                    new("Best Bid - 15") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bb-15").ToString()},
+                    new("Best Offer + 15") {CallbackData =  new CallbackQueryCallbackData("trade/price", "bo+15").ToString()}
+                };
+
+            List<InlineKeyboardButton> row6 = new()
+                {
+                    new("Custom") {CallbackData =  new CallbackQueryCallbackData("trade/price", "custom").ToString()},
+                };
+
+
+            List<List<InlineKeyboardButton>> inlineButtons = new()
+                {
+                    row1,
+                    row2,
+                    row3,
+                    row4,
+                    row5,
+                    row6,
+                    CreateBackButtonRow("price"),
+                    HomeButtonRow
+                };
+
+
+            InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
+            return inlineButtonsMarkup;
+        }
+
+        private void UpdateLastUsedTradePocoPerChatId(long chatId, TelegramTradePoco tradePoco)
+        {
+            if (_chatIdToLastUsedTradePoco.TryGetValue(chatId, out var oldPoco))
+                _chatIdToLastUsedTradePoco.TryUpdate(chatId, tradePoco, oldPoco);
+            else
+                _chatIdToLastUsedTradePoco.TryAdd(chatId, tradePoco);
+        }
 
         private async Task DeletePromptMessage(long chatId, TelegramTradePoco tradePoco)
         {
@@ -1215,7 +1287,10 @@ Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ??
         #region buttons
         private const string _posShowActionsCallBackData = "posShowActions";
         private const string _posSummaryViewCallBackData = "posSummaryView";
-        private const string _genAutoPingCallBackData = "genAutoPing";
+        private const string _pingAutoPingCallBackData = "pingAutoPing";
+        private const string _pingShowUPnLCallBackData = "pingShowUPnL";
+        private const string _pingShowNAVCallBackData = "pingShowNAV";
+        private const string _pingShowClosestLiquidationPercentageCallBackData = "pingShowClosestLiquidationPercentage";
         #endregion
 
         public SettingsTelegramController(BotClient client) : base(client) { }
@@ -1246,8 +1321,17 @@ Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ??
                 case _posSummaryViewCallBackData:
                     settings.Pos_SummaryView = !settings.Pos_SummaryView;
                     break;
-                case _genAutoPingCallBackData:
-                    settings.Gen_AutoPing = !settings.Gen_AutoPing;
+                case _pingAutoPingCallBackData:
+                    settings.Ping_AutoPing = !settings.Ping_AutoPing;
+                    break;
+                case _pingShowUPnLCallBackData:
+                    SetPingMetricFromClick(settings, PingMetric.UPnL);
+                    break;
+                case _pingShowNAVCallBackData:
+                    SetPingMetricFromClick(settings, PingMetric.NAV);
+                    break;
+                case _pingShowClosestLiquidationPercentageCallBackData:
+                    SetPingMetricFromClick(settings, PingMetric.ClosestToLiq);
                     break;
                 default:
                     break;
@@ -1263,6 +1347,14 @@ Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ??
             await Client.EditMessageReplyMarkupAsync(editMessageArgs);
         }
 
+        private static void SetPingMetricFromClick(TelegramSettings settings, PingMetric pingMetricClicked)
+        {
+            if (settings.Ping_MetricToShow == pingMetricClicked)
+                settings.Ping_MetricToShow = PingMetric.None;
+            else
+                settings.Ping_MetricToShow = pingMetricClicked;
+        }
+
         public override async Task<bool> HandleMessage(Telegram.BotAPI.AvailableTypes.Message update)
         {
             return false;
@@ -1273,8 +1365,8 @@ Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ??
         {
             try
             {
-                if (_chatIdToSettingsMessageId.TryRemove(chat.Id, out int messageId))
-                    await Client.DeleteMessageAsync(chat.Id, messageId);
+                _chatIdToSettingsMessageId.TryRemove(chat.Id, out int messageId);
+                await Client.DeleteMessageAsync(chat.Id, messageId);
             }
             catch (Exception ex)
             {
@@ -1298,23 +1390,36 @@ Use the bottons below to toggle your settings";
         {
             var actionsEmoji = TelegramTextHelper.GetBoolEmoji(settings.Pos_ShowActionButtonsPerPosition);
             var summaryEmoji = TelegramTextHelper.GetBoolEmoji(settings.Pos_SummaryView);
-            var pingEmojie = TelegramTextHelper.GetBoolEmoji(settings.Gen_AutoPing);
             var posShowActions = new InlineKeyboardButton($"Show Actions {actionsEmoji}") { CallbackData = new CallbackQueryCallbackData("settings", _posShowActionsCallBackData).ToString() };
             var posSummaryView = new InlineKeyboardButton($"Summary View {summaryEmoji}") { CallbackData = new CallbackQueryCallbackData("settings", _posSummaryViewCallBackData).ToString() };
-            var posAutoPing = new InlineKeyboardButton($"Auto Ping {pingEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", _genAutoPingCallBackData).ToString() };
+
             List<InlineKeyboardButton> row1 = new()
             {
                 posShowActions, posSummaryView
             };
+
+            var pingAutoEmojie = TelegramTextHelper.GetBoolEmoji(settings.Ping_AutoPing);
+            var pingAutoPing = new InlineKeyboardButton($"Auto Ping {pingAutoEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", _pingAutoPingCallBackData).ToString() };
             List<InlineKeyboardButton> row2 = new()
             {
-                posAutoPing
+                pingAutoPing
+            };
+            var pingShowUPnLEmojie = TelegramTextHelper.GetBoolEmoji(settings.Ping_MetricToShow == PingMetric.UPnL);
+            var pingShowNAVEmojie = TelegramTextHelper.GetBoolEmoji(settings.Ping_MetricToShow == PingMetric.NAV);
+            var pingShowCLosestToLiqEmojie = TelegramTextHelper.GetBoolEmoji(settings.Ping_MetricToShow == PingMetric.ClosestToLiq);
+            var pingShowUPnL = new InlineKeyboardButton($"Show UPnL {pingShowUPnLEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", _pingShowUPnLCallBackData).ToString() };
+            var pingShowNAV = new InlineKeyboardButton($"Show NAV {pingShowNAVEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", _pingShowNAVCallBackData).ToString() };
+            var pingShowClosestLiq = new InlineKeyboardButton($"Show Closest Liq% {pingShowCLosestToLiqEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", _pingShowClosestLiquidationPercentageCallBackData).ToString() };
+            List<InlineKeyboardButton> row3 = new()
+            {
+                pingShowUPnL, pingShowNAV, pingShowClosestLiq
             };
 
             List<List<InlineKeyboardButton>> inlineButtons = new()
             {
                 row1,
                 row2,
+                row3,
                 HomeButtonRow,
             };
 
@@ -1326,10 +1431,18 @@ Use the bottons below to toggle your settings";
     #endregion
 
     #region helper classes
+    public enum PingMetric
+    {
+        None,
+        UPnL,
+        NAV,
+        ClosestToLiq
+    }
     public class TelegramSettings
     {
-        #region general
-        public bool Gen_AutoPing { get; set; }
+        #region Pings
+        public bool Ping_AutoPing { get; set; }
+        public PingMetric Ping_MetricToShow { get; set; }
         public int? PingMessageId { get; set; }
         #endregion
         #region positions
