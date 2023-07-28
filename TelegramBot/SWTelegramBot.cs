@@ -4,6 +4,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime;
 using System.Windows.Forms;
 using System.Windows.Input;
 using Telegram.BotAPI;
@@ -12,6 +13,9 @@ using Telegram.BotAPI.AvailableMethods.FormattingOptions;
 using Telegram.BotAPI.AvailableTypes;
 using Telegram.BotAPI.GettingUpdates;
 using Telegram.BotAPI.UpdatingMessages;
+using static TelegramBot.BalancesTelegramController;
+using static TelegramBot.PositionsTelegramController;
+using static TelegramBot.TradeTelegramController;
 using File = System.IO.File;
 
 namespace TelegramBot
@@ -168,7 +172,7 @@ namespace TelegramBot
                                 break;
                             }
 
-                            if (!_lastUsedControllerPerChat.TryGetValue(update.Message.Chat.Id, out controller) || _lastUsedControllerPerChat == null)
+                            if (!_lastUsedControllerPerChat.TryGetValue(update.Message.Chat.Id, out controller))
                                 await _botClient.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
                             else
                                 if (!await controller.HandleMessage(update.Message))
@@ -178,7 +182,10 @@ namespace TelegramBot
                             if (update?.CallbackQuery?.Data == null || update?.CallbackQuery?.Message?.Chat == null)
                                 break;
 
-                            EnsureChatIsConfigured(update?.Message?.Chat?.Id);
+                            await EnsureChatIsConfigured(update?.Message?.Chat?.Id);
+
+                            if (_lastUsedControllerPerChat.TryGetValue(update.CallbackQuery.Message.Chat.Id, out var lastUsedController)) //TODO: Need to check if the last controller has changed!
+                                await lastUsedController.CleanUp(update.CallbackQuery.Message.Chat.Id);
 
                             if (await RunCommandMessage(update.CallbackQuery.Message.Chat, update.CallbackQuery.Data, update.CallbackQuery.Message.MessageId))
                                 break;
@@ -268,10 +275,11 @@ namespace TelegramBot
                 command += "telegramcontroller";
             if (_controllersByType.TryGetValue(command, out BaseTelegramController controller))
             {
-                UpdateLastUsedController(chat, controller);
                 try
                 {
                     await controller.RunInitCommand(chat);
+                    //this must happen after we use the controller as the controller needs to know if it was the last one to be used or not
+                    UpdateLastUsedController(chat, controller);
                     return true;
                 }
                 catch (Exception ex)
@@ -390,6 +398,7 @@ namespace TelegramBot
         protected static InlineKeyboardButton HomeButton = new InlineKeyboardButton("🏡 Home") { CallbackData = "/home" };
         protected static List<InlineKeyboardButton> HomeButtonRow = new() { HomeButton };
         protected InlineKeyboardButton TradeButton = new InlineKeyboardButton("💸 Trade") { CallbackData = "/trade" };
+        protected InlineKeyboardButton SettingsButton = new InlineKeyboardButton("⚙ Settings") { CallbackData = "/settings" };
         public BaseTelegramController(BotClient client)
         {
             Client = client;
@@ -407,6 +416,72 @@ namespace TelegramBot
         public abstract Task<bool> HandleMessage(Telegram.BotAPI.AvailableTypes.Message update);
 
         public abstract Task RunInitCommand(Chat chat);
+
+        protected async Task<Telegram.BotAPI.AvailableTypes.Message> BaseSendOrUpdate(ConcurrentDictionary<long, int> chatIdToMessageId, Chat chat, string messageText, List<List<InlineKeyboardButton>>? inlineButtons)
+        {
+            messageText = TelegramHelper.EscapeSpecialCharacters(messageText);
+            InlineKeyboardMarkup? inlineButtonsMarkup = null;
+            if (inlineButtons != null)
+                inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
+
+            bool sendNew = false;
+
+            if (!SWTelegramBot.IsLastUsedControllerForChat(chat.Id, this))
+                sendNew = true;
+            if (!chatIdToMessageId.TryGetValue(chat.Id, out int messageId))
+            {
+                sendNew = true;
+            }
+            else if (sendNew)
+            {
+                try
+                {
+                    chatIdToMessageId.TryRemove(chat.Id, out var _);
+                    await Client.DeleteMessageAsync(chat.Id, messageId);
+                }
+                catch { }
+            }
+
+            if (!sendNew)
+            {
+                try
+                {
+                    EditMessageTextArgs editMessageTextArgs = new(messageText)
+                    {
+                        ChatId = chat.Id,
+                        MessageId = messageId,
+                        ParseMode = ParseMode.MarkdownV2,
+                        ReplyMarkup = inlineButtonsMarkup
+                    };
+                    var message = await Client.EditMessageTextAsync(editMessageTextArgs);
+                    return message;
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        chatIdToMessageId.TryRemove(chat.Id, out _);
+                        await Client.DeleteMessageAsync(chat.Id, messageId);
+                    }
+                    catch { }
+                    sendNew = true;
+                }
+            }
+
+            if (sendNew)
+            {
+                SendMessageArgs args = new(chat.Id, messageText);
+                args.ParseMode = ParseMode.MarkdownV2;
+                args.ReplyMarkup = inlineButtonsMarkup;
+                var newMessage = await Client.SendMessageAsync(args);
+                chatIdToMessageId.TryAdd(chat.Id, newMessage.MessageId);
+                return newMessage;
+            }
+
+            throw new Exception("Well this shouldn't have happened");
+        }
+
+        public abstract Task CleanUp(long chatId);
     }
 
     public class HomeTelegramController : BaseTelegramController
@@ -480,13 +555,10 @@ Use the buttons below to navigate";
             {
                 CallbackData = "/accounts"
             };
-            InlineKeyboardButton settingsButton = new InlineKeyboardButton("⚙ Settings")
-            {
-                CallbackData = "/settings"
-            };
+            
             List<InlineKeyboardButton> row3 = new()
             {
-                accountsButton, settingsButton
+                accountsButton, SettingsButton
             };
 
             List<InlineKeyboardButton> row4 = new()
@@ -510,79 +582,103 @@ Use the buttons below to navigate";
             var message = await Client.SendMessageAsync(args);
             _chatIdToHomeMessageId.TryAdd(message.Chat.Id, message.MessageId);
         }
+
+        public override async Task CleanUp(long chatId)
+        {
+        }
     }
 
     public class BalancesTelegramController : BaseTelegramController
     {
-        ConcurrentDictionary<long, ConcurrentDictionary<string, int>> _chatIdToViewByToMessageId = new();
-
-        #region buttons
-        private const string _coinCallBackData = "coin";
-        private const string _exchangeCallBackData = "exchange";
-        private const string _accountCallBackData = "account";
-        private InlineKeyboardButton _byCoinButton = new InlineKeyboardButton("💰 Coin") { CallbackData = new CallbackQueryCallbackData("balances", _coinCallBackData).ToString() };
-        private InlineKeyboardButton _byExchangeButton = new InlineKeyboardButton("💰 Exchange") { CallbackData = new CallbackQueryCallbackData("balances", _exchangeCallBackData).ToString() };
-        private InlineKeyboardButton _byAccountButton = new InlineKeyboardButton("💰 Account") { CallbackData = new CallbackQueryCallbackData("balances", _accountCallBackData).ToString() };
-        #endregion
+        public enum BalancesViewOptions
+        {
+            Summary, Coin, Exchange, Account
+        }
+        ConcurrentDictionary<long, int> _chatIdToMessageId = new();
 
         public BalancesTelegramController(BotClient client) : base(client)
         {
         }
-
+        
+        #region BaseTelegramController
         public override async Task HandleCallbackQuery(CallbackQuery update, string path, CallbackQueryCallbackData data)
         {
             if (update.Message?.Chat == null)
                 return;
-            try
-            {
-                if (_chatIdToViewByToMessageId.TryGetValue(update.Message.Chat.Id, out var viewByToMessageId_int))
-                {
-                    if (viewByToMessageId_int.TryRemove(data.Data, out var messageId))
-                        await Client.DeleteMessageAsync(update.Message.Chat.Id, messageId);
-                }
-            }
-            catch (Exception ex)
-            {
-                //Log here
-            }
+
             string messageText = "";
-            List <InlineKeyboardButton> row1 = new();
-            switch (data.Data)
+            Enum.TryParse(data.Data, out BalancesViewOptions view);
+            switch (view)
             {
-                case _coinCallBackData:
-                    row1.Add(_byExchangeButton);
-                    row1.Add(_byAccountButton);
+                case BalancesViewOptions.Coin:
                     messageText = await GetBalanceByCoinMessageText();
                     break;
-                case _exchangeCallBackData:
-                    row1.Add(_byCoinButton);
-                    row1.Add(_byAccountButton);
+                case BalancesViewOptions.Exchange:
                     messageText = await GetBalanceByExchangeMessageText();
                     break;
-                case _accountCallBackData:
-                    row1.Add(_byCoinButton);
-                    row1.Add(_byExchangeButton);
+                case BalancesViewOptions.Account:
                     messageText = await GetBalanceByAccountMessageText();
                     break;
                 default:
+                    await RunInitCommand(update.Message.Chat);
+                    return;
                     break;
             }
+
+            var message = await SendOrUpdateBalancesMessage(update.Message.Chat, messageText, view);
+        }
+        public override async Task<bool> HandleMessage(Telegram.BotAPI.AvailableTypes.Message update)
+        {
+            return false;
+            //Log message here
+        }
+        public override async Task RunInitCommand(Chat chat)
+        {
+            string messageText = await GetBalanceSummaryText();
+            await SendOrUpdateBalancesMessage(chat, messageText, BalancesViewOptions.Summary);
+        }
+
+        public override async Task CleanUp(long chatId)
+        {
+        }
+
+        private async Task<Telegram.BotAPI.AvailableTypes.Message> SendOrUpdateBalancesMessage(Chat chat, string messageText, BalancesViewOptions view)
+        {
+            InlineKeyboardButton _summary = new InlineKeyboardButton($"💰 Summary {(view == BalancesViewOptions.Summary ? "✅" : "")}") { CallbackData = new CallbackQueryCallbackData("balances", BalancesViewOptions.Summary.ToString()).ToString() };
+            InlineKeyboardButton _byCoinButton = new InlineKeyboardButton($"💰 Coin {(view == BalancesViewOptions.Coin ? "✅" : "")}") { CallbackData = new CallbackQueryCallbackData("balances", BalancesViewOptions.Coin.ToString()).ToString() };
+            InlineKeyboardButton _byExchangeButton = new InlineKeyboardButton($"💰 Exchange {(view == BalancesViewOptions.Exchange ? "✅" : "")}") { CallbackData = new CallbackQueryCallbackData("balances", BalancesViewOptions.Exchange.ToString()).ToString() };
+            InlineKeyboardButton _byAccountButton = new InlineKeyboardButton($"💰 Account {(view == BalancesViewOptions.Account ? "✅" : "")}") { CallbackData = new CallbackQueryCallbackData("balances", BalancesViewOptions.Account.ToString()).ToString() };
+
+            List<InlineKeyboardButton> row1 = new()
+            {
+                _summary, _byCoinButton
+            };
+            List<InlineKeyboardButton> row2 = new()
+            {
+                _byExchangeButton, _byAccountButton
+            };
 
             List<List<InlineKeyboardButton>> inlineButtons = new()
             {
                 row1,
+                row2,
                 HomeButtonRow,
             };
-
-            InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
-            SendMessageArgs args = new(update.Message.Chat.Id, messageText);
-            args.ParseMode = ParseMode.MarkdownV2;
-            args.ReplyMarkup = inlineButtonsMarkup;
-            var message = await Client.SendMessageAsync(args);
-            var viewByToMessageId = _chatIdToViewByToMessageId.GetOrAdd(update.Message.Chat.Id, new ConcurrentDictionary<string, int>());
-            viewByToMessageId.TryAdd(data.Data, message.MessageId);
+            return await BaseSendOrUpdate(_chatIdToMessageId, chat, messageText, inlineButtons);
         }
+        #endregion
+        
+        private async Task<string> GetBalanceSummaryText()
+        {
+            return
+@"*Balances Summary*
+`
+Total:        $4,348,152
+Top Exchange: Binance
+Top Coin:     BTC`
 
+Balances can be viewed as a summary or aggregated by one of the below categories:";
+        }
         private async Task<string> GetBalanceByCoinMessageText()
         {
             return
@@ -595,9 +691,8 @@ Other:           ($ 4,467.34)
 
 Total            ($25,813.87)`
 
-View breakdown by:";
+Balances can be viewed as a summary or aggregated by one of the below categories:";
         }
-
         private async Task<string> GetBalanceByAccountMessageText()
         {
             return
@@ -611,9 +706,8 @@ PA_Trading_Bi... : $   110.67
 
 Total              $25,813.87`
 
-View breakdown by:";
+Balances can be viewed as a summary or aggregated by one of the below categories:";
         }
-
         private async Task<string> GetBalanceByExchangeMessageText()
         {
             return
@@ -625,81 +719,631 @@ Binance   : $ 3,127.20
 
 Total       $25,813.87`
 
-View breakdown by:";
+Balances can be viewed as a summary or aggregated by one of the below categories:";
         }
+    }
 
-        public override async Task<bool> HandleMessage(Telegram.BotAPI.AvailableTypes.Message update)
+    public class PositionsTelegramController : BaseTelegramController
+    {
+        public class Position
         {
+            public string PositionText { get; set; }
+            public int PositionId { get; set; }
+        }
+        InlineKeyboardButton _bySummary = new InlineKeyboardButton($"🔙") { CallbackData = new CallbackQueryCallbackData("positions", PositionsViewOptions.Summary.ToString()).ToString() };
+        InlineKeyboardButton _details = new InlineKeyboardButton($"🔍 View Details") { CallbackData = new CallbackQueryCallbackData("positions", PositionsViewOptions.Details.ToString()).ToString() };
+        InlineKeyboardButton _byLiquidationButton = new InlineKeyboardButton($"Liquidation") { CallbackData = new CallbackQueryCallbackData("positions", PositionsViewOptions.Liquidation.ToString()).ToString() };
+        InlineKeyboardButton _byWinButton = new InlineKeyboardButton($"🏆 Winners") { CallbackData = new CallbackQueryCallbackData("positions", PositionsViewOptions.Win.ToString()).ToString() };
+        InlineKeyboardButton _byLoseButton = new InlineKeyboardButton($"Losers") { CallbackData = new CallbackQueryCallbackData("positions", PositionsViewOptions.Lose.ToString()).ToString() };
+        InlineKeyboardButton _byLongButton = new InlineKeyboardButton($"Long") { CallbackData = new CallbackQueryCallbackData("positions", PositionsViewOptions.Long.ToString()).ToString() };
+        InlineKeyboardButton _byShortButton = new InlineKeyboardButton($"Short") { CallbackData = new CallbackQueryCallbackData("positions", PositionsViewOptions.Short.ToString()).ToString() };
+        InlineKeyboardButton _bySizeButton = new InlineKeyboardButton($"Size") { CallbackData = new CallbackQueryCallbackData("positions", PositionsViewOptions.Size.ToString()).ToString() };
+
+        public enum PositionsViewOptions
+        {
+            ShowButtons, Summary, Details, Liquidation, Win, Lose, Long, Short, Size
+        }
+        ConcurrentDictionary<long, int> _chatIdToMessageId = new();
+        ConcurrentDictionary<long, int> _chatIdToPromptId = new();
+        ConcurrentDictionary<long, List<int>> _chatIdToPositionMessages = new();
+
+        public PositionsTelegramController(BotClient client) : base(client) {}
+
+        #region BaseTelegramController
+        public override async Task HandleCallbackQuery(CallbackQuery update, string path, CallbackQueryCallbackData data)
+        {
+            if (update.Message?.Chat == null)
+                return;
+            var message = await MoveMessageToBottomIfNecessary(update);
+            var chat = message.Chat;
+
+            if (!SWTelegramBot.TelegramSettingsPerChat.TryGetValue(chat.Id, out var settings))
+                return;
+
+            if (path == "positions")
+                await ManageBasePositionsPath(message, data, chat, settings);
+            if (path == "positions/marketClose")
+            {
+
+            }
+
+            if (path == "positions/limitClose")
+            {
+
+            }
+        }
+        public override async Task<bool> HandleMessage(Telegram.BotAPI.AvailableTypes.Message message)
+        {
+            if (message?.Chat == null)
+                return false;
+
+            await RemovePrompt(message.Chat.Id);
+            
             return false;
             //Log message here
         }
-
         public override async Task RunInitCommand(Chat chat)
         {
-            string messageText =
-@"*Balances*
-`
-Total:        $4,348,152
-Top Exchange: Binance
-Top Coin:     BTC`
+            await RemovePrompt(chat.Id);
+            await SendSummaryView(chat);
+        }
 
-View breakdown by:";
+        public override async Task CleanUp(long chatId)
+        {
+            await RemovePrompt(chatId);
+        }
+        #endregion
 
+        private async Task<Telegram.BotAPI.AvailableTypes.Message> MoveMessageToBottomIfNecessary(CallbackQuery update)
+        {
+            if (!SWTelegramBot.IsLastUsedControllerForChat(update.Message.Chat.Id, this))
+            {
+                SendMessageArgs args = new(update.Message.Chat.Id, TelegramHelper.EscapeSpecialCharacters(update.Message.Text));
+                args.ParseMode = ParseMode.MarkdownV2;
+                args.ReplyMarkup = update.Message.ReplyMarkup;
+                var message = await Client.SendMessageAsync(args);
+                try
+                {
+                    await Client.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
+                }
+                catch (Exception ex)
+                {
+                    //Log
+                }
+                _chatIdToMessageId.TryRemove(update.Message.Chat.Id, out _);
+                _chatIdToMessageId.TryAdd(message.Chat.Id, message.MessageId);
+                
+                return message;
+            }
+            return update.Message;
+        }
+
+        private async Task ManageBasePositionsPath(Telegram.BotAPI.AvailableTypes.Message message, CallbackQueryCallbackData data, Chat chat, TelegramSettings settings)
+        {
+            Enum.TryParse(data.Data, out PositionsViewOptions view);
+            switch (view)
+            {
+                case PositionsViewOptions.Summary:
+                    await RemovePrompt(chat.Id);
+                    await SendSummaryView(chat);
+                    break;
+                case PositionsViewOptions.Details:
+                    await RemovePrompt(chat.Id);
+                    await SendOrUpdateViewDetailsByPrompt(chat.Id, settings, null);
+                    break;
+                case PositionsViewOptions.Liquidation:
+                    await RemovePrompt(chat.Id);
+                    await SendLiquidationView(chat, settings);
+                    break;
+                case PositionsViewOptions.Win:
+                    await RemovePrompt(chat.Id);
+                    await SendWinnersView(chat, settings);
+                    break;
+                case PositionsViewOptions.Lose:
+                    await RemovePrompt(chat.Id);
+                    await SendLosersView(chat, settings);
+                    break;
+                case PositionsViewOptions.Long:
+                    await RemovePrompt(chat.Id);
+                    await SendLongView(chat, settings);
+                    break;
+                case PositionsViewOptions.Short:
+                    await RemovePrompt(chat.Id);
+                    await SendShortView(chat, settings);
+                    break;
+                case PositionsViewOptions.Size:
+                    await RemovePrompt(chat.Id);
+                    await SendSizeView(chat, settings);
+                    break;
+                case PositionsViewOptions.ShowButtons:
+                    settings.Pos_ShowActionButtonsPerPosition = !settings.Pos_ShowActionButtonsPerPosition;
+                    await SettingsTelegramController.UpdateSettingsMessage(Client, chat.Id, settings);
+                    await SendOrUpdateViewDetailsByPrompt(chat.Id, settings, message.MessageId);
+                    break;
+                default:
+                    await RemovePrompt(chat.Id);
+                    await RunInitCommand(message.Chat);
+                    return;
+                    break;
+            }
+        }
+        private async Task SendSummaryView(Chat chat)
+        {
+            var messageText = await GetPositionsSummaryText();
 
             List<InlineKeyboardButton> row1 = new()
             {
-                _byCoinButton, _byExchangeButton, _byAccountButton
+                _details, HomeButton
             };
 
+            List<List<InlineKeyboardButton>> inlineButtons = new()
+            {
+                row1
+            };
 
+            await BaseSendOrUpdate(_chatIdToMessageId, chat, messageText, inlineButtons);
+        }
+        private async Task SendWinnersView(Chat chat, TelegramSettings settings)
+        {
+            var messageText = await GetPositionsSummaryText();
+
+            List<InlineKeyboardButton> row1 = new()
+            {
+                _bySummary, HomeButton
+            };
+
+            List<List<InlineKeyboardButton>> inlineButtons = new()
+            {
+                row1
+            };
+
+            await BaseSendOrUpdate(_chatIdToMessageId, chat, messageText, inlineButtons);
+        }
+        private async Task SendLosersView(Chat chat, TelegramSettings settings)
+        {
+            var messageText = await GetPositionsSummaryText();
+
+            List<InlineKeyboardButton> row1 = new()
+            {
+                _bySummary, HomeButton
+            };
+
+            List<List<InlineKeyboardButton>> inlineButtons = new()
+            {
+                row1
+            };
+
+            await BaseSendOrUpdate(_chatIdToMessageId, chat, messageText, inlineButtons);
+        }
+        private async Task SendLiquidationView(Chat chat, TelegramSettings settings)
+        {
+            if (settings.Pos_ShowActionButtonsPerPosition)
+                await SendLiquidationViewWithButtons(chat);
+            else
+                await SendLiquidationViewSingle(chat);
+        }
+
+        private async Task SendLiquidationViewSingle(Chat chat)
+        {
+            var messageText = await GetPositionsByLiquidationMessageText();
+
+            List<InlineKeyboardButton> row1 = new()
+            {
+                _bySummary, HomeButton
+            };
+
+            List<List<InlineKeyboardButton>> inlineButtons = new()
+            {
+                row1
+            };
+
+            await BaseSendOrUpdate(_chatIdToMessageId, chat, messageText, inlineButtons);
+        }
+
+        private async Task SendLiquidationViewWithButtons(Chat chat)
+        {
+            var messages = await GetPositionsByLiquidationDetails();
+            await BaseSendOrUpdate(_chatIdToMessageId, chat, "*Positions closest to liquidation* 👇", null);
+            List<int> possitionMessageIds = new();
+            var lastPosition = messages.Last();
+            foreach (var position in messages)
+            {
+                var inlineButtons = await GetClosePositionButtons(position);
+                var message = await Client.SendMessageAsync(TelegramHelper.BuildSendMessageArgs(chat.Id, position.PositionText, inlineButtons));
+                possitionMessageIds.Add(message.MessageId);
+            }
+
+            List<List<InlineKeyboardButton>> backButtonRow = new() { new() { _bySummary /*new($"Back") { CallbackData = new CallbackQueryCallbackData(@"positions/back", "").ToString() }*/ } };
+            var backMessage = await Client.SendMessageAsync(TelegramHelper.BuildSendMessageArgs(chat.Id, "*Positions closest to liquidation* 👆", backButtonRow));
+            possitionMessageIds.Add(backMessage.MessageId);
+
+            _chatIdToPositionMessages.TryAdd(chat.Id, possitionMessageIds);
+        }
+        private async Task<List<List<InlineKeyboardButton>>> GetClosePositionButtons(Position position)
+        {
+            var market = new InlineKeyboardButton($"Market Close") { CallbackData = new CallbackQueryCallbackData(@"positions/marketClose", position.PositionId.ToString()).ToString() };
+            var limit = new InlineKeyboardButton($"Limit Close") { CallbackData = new CallbackQueryCallbackData(@"positions/limitClose", position.PositionId.ToString()).ToString() };
+            List<InlineKeyboardButton> row = new()
+            {
+                market, limit
+            };
+            List<List<InlineKeyboardButton>> buttons = new()
+            {
+                row
+            };
+            return buttons;
+        }
+        private async Task SendLongView(Chat chat, TelegramSettings settings)
+        {
+            var messageText = await GetPositionsLongText();
+
+            List<InlineKeyboardButton> row1 = new()
+            {
+                _bySummary, HomeButton
+            };
+
+            List<List<InlineKeyboardButton>> inlineButtons = new()
+            {
+                row1
+            };
+
+            await BaseSendOrUpdate(_chatIdToMessageId, chat, messageText, inlineButtons);
+        }
+        private async Task SendShortView(Chat chat, TelegramSettings settings)
+        {
+            var messageText = await GetPositionsShortText();
+
+            List<InlineKeyboardButton> row1 = new()
+            {
+                _bySummary, HomeButton
+            };
+
+            List<List<InlineKeyboardButton>> inlineButtons = new()
+            {
+                row1
+            };
+
+            await BaseSendOrUpdate(_chatIdToMessageId, chat, messageText, inlineButtons);
+        }
+        private async Task SendSizeView(Chat chat, TelegramSettings settings)
+        {
+            var messageText = await GetPositionsSummaryText();
+
+            List<InlineKeyboardButton> row1 = new()
+            {
+                _bySummary, HomeButton
+            };
+
+            List<List<InlineKeyboardButton>> inlineButtons = new()
+            {
+                row1
+            };
+
+            await BaseSendOrUpdate(_chatIdToMessageId, chat, messageText, inlineButtons);
+        }
+        private async Task SendOrUpdateViewDetailsByPrompt(long chatId, TelegramSettings settings, int? messageId)
+        {
+            string messageText = @"View position details by:";
+            var actionsEmoji = TelegramHelper.GetBoolEmoji(settings.Pos_ShowActionButtonsPerPosition);
+            var showButtonsButton = new InlineKeyboardButton($"Show Actions {actionsEmoji}") { CallbackData = new CallbackQueryCallbackData("positions", PositionsViewOptions.ShowButtons.ToString()).ToString() };
+            List<InlineKeyboardButton> row1 = new()
+            {
+                showButtonsButton
+            };
             List<InlineKeyboardButton> row2 = new()
             {
-                HomeButton
+                _byLiquidationButton, _bySizeButton
+            };
+            List<InlineKeyboardButton> row3 = new()
+            {
+                _byWinButton, _byLoseButton
+            };
+            List<InlineKeyboardButton> row4 = new()
+            {
+                _byLongButton, _byShortButton
             };
 
             List<List<InlineKeyboardButton>> inlineButtons = new()
             {
                 row1,
                 row2,
+                row3,
+                row4
             };
 
-            InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
-            SendMessageArgs args = new(chat.Id, messageText);
-            args.ParseMode = ParseMode.MarkdownV2;
-            args.ReplyMarkup = inlineButtonsMarkup;
-            var message = await Client.SendMessageAsync(args);
-        }
-    }
-
-    public class PositionsTelegramController : BaseTelegramController
-    {
-        ConcurrentDictionary<long, ConcurrentDictionary<string, int>> _chatIdToViewByToMessageId = new();
-
-        #region buttons
-        private const string _coinCallBackData = "coin";
-        private const string _exchangeCallBackData = "exchange";
-        private const string _accountCallBackData = "account";
-        private InlineKeyboardButton _byCoinButton = new InlineKeyboardButton("💰 Coin") { CallbackData = new CallbackQueryCallbackData("balances", _coinCallBackData).ToString() };
-        private InlineKeyboardButton _byExchangeButton = new InlineKeyboardButton("💰 Exchange") { CallbackData = new CallbackQueryCallbackData("balances", _exchangeCallBackData).ToString() };
-        private InlineKeyboardButton _byAccountButton = new InlineKeyboardButton("💰 Account") { CallbackData = new CallbackQueryCallbackData("balances", _accountCallBackData).ToString() };
-        #endregion
-
-        public PositionsTelegramController(BotClient client) : base(client) {}
-
-        public override Task HandleCallbackQuery(CallbackQuery update, string path, CallbackQueryCallbackData data)
-        {
-            throw new NotImplementedException();
+            
+            if (messageId.HasValue)
+            {
+                InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
+                EditMessageReplyMarkup args = new EditMessageReplyMarkup()
+                {
+                    ChatId = chatId,
+                    MessageId = messageId.Value,
+                    ReplyMarkup = inlineButtonsMarkup
+                };
+                await Client.EditMessageReplyMarkupAsync(args);
+            }
+            else
+            {
+                var message = await Client.SendMessageAsync(TelegramHelper.BuildSendMessageArgs(chatId, messageText, inlineButtons));
+                messageId = message.MessageId;
+            }
+            _chatIdToPromptId.TryAdd(chatId, messageId.Value);
         }
 
-        public override async Task<bool> HandleMessage(Telegram.BotAPI.AvailableTypes.Message update)
+
+
+        private async Task RemovePrompt(long chatId)
         {
-            return false;
-            //Log message here
+            List<Task> tasks = new();
+            if (_chatIdToPromptId.TryRemove(chatId, out int promptMessageId))
+            {
+                try
+                {
+                    tasks.Add(Client.DeleteMessageAsync(chatId, promptMessageId));
+                }
+                catch (Exception) { }
+            }
+
+            if (_chatIdToPositionMessages.TryRemove(chatId, out List<int> possitionMessageIds))
+            {
+                foreach (var possitionMessageId in possitionMessageIds)
+                {
+                    try
+                    {
+                        tasks.Add(Client.DeleteMessageAsync(chatId, possitionMessageId));
+                    }
+                    catch (Exception) { }
+                }
+            }
+            await Task.WhenAll(tasks);
+            //TODO: Add with aggregate exceptions
         }
 
-        public override Task RunInitCommand(Chat chat)
+        private async Task<Telegram.BotAPI.AvailableTypes.Message> SendOrUpdateBalancesMessage(Chat chat, string messageText, PositionsViewOptions view)
         {
-            throw new NotImplementedException();
+
+            List<InlineKeyboardButton> row1 = new()
+            {
+                _bySummary, _byLiquidationButton
+            };
+            List<InlineKeyboardButton> row2 = new()
+            {
+                _byWinButton, _byLoseButton, _bySizeButton,
+            };
+            List<InlineKeyboardButton> row3 = new()
+            {
+                _byLongButton, _byShortButton
+            };
+
+            List<InlineKeyboardButton> row4 = new()
+            {
+                HomeButton, SettingsButton
+            };
+
+            List<List<InlineKeyboardButton>> inlineButtons = new()
+            {
+                row1,
+                row2,
+                row3,
+                row4,
+            };
+
+            //InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
+            return await BaseSendOrUpdate(_chatIdToMessageId, chat, messageText, inlineButtons);
+        }
+
+        private async Task<string> GetPositionsSummaryText()
+        {
+            return
+@"*Positions*
+
+# of positions: 6
+Total UPnL:  $ -0.16
+Min Distance to Liq: 70%
+
+`Symbol   $ Total  Eff Exp
+TOTAL      -2.2m  (  9.3%)`
+*Longs  (4)*
+` BTC       12.8k  ( 40.4%)
+ ADA          12  (  1.0%)
+ BAT         981  (  1.0%)
+ BLUR       9.8m  (  1.0%)`
+*Shorts  (3)*
+` BTC      -12.8k  ( -4.4%)
+ ADA         -12  ( -1.0%)
+ BLUR      -9.8m  ( -1.0%)`
+
+Positions can be viewed as a summary or aggregated by one of the below categories:";
+        }
+        private async Task<string> GetPositionsByLiquidationMessageText()
+        {
+            return
+@"*Positions closest to liquidation*
+`
+▲ XBTUSD        BitMEX 
+20k  @29,100    2.5% 
+
+▼ ETHUSD        Binance 
+1.6m  @2,100    5.9% 
+
+▲ XBTUSD        BitMEX 
+20k  @29,100    10.48% 
+
+▼ ETHUSD        Binance 
+1.6m  @2,100    23.15% 
+
+Total            ($25,813.87)`
+
+Positions can be viewed as a summary or aggregated by one of the below categories:";
+        }
+        private async Task<string> GetPositionsByWinLoseText()
+        {
+            return
+@"*Positions (Winners/Losers)*
+`
+Strat1_ByBIT     : $13,573.37
+Strat1_BitMEX    : $ 7,641.41
+Strat1_BINANANCE : $ 3,127.20
+PA_Trading_Bybit : $ 1,345.14
+PA_Trading_Bi... : $   110.67
+
+Total              $25,813.87`
+
+Positions can be viewed as a summary or aggregated by one of the below categories:";
+        }
+        private async Task<string> GetPositionsLongText()
+        {
+            return
+@"*Top 5 Long Positions*
+`
+🟩🟩🟩 LONGS 🟩🟩🟩
+
+▲ XBTUSD        BitMEX 
+20k  @29,100    + $45k
+
+▼ ETHUSD        Binance 
+1.6m  @2,100    - $105k
+
+▲ BTCUSDT_Perp    BitMEX 
+20k  @29,100      + $412
+
+▼ AACEUSDC_Coin   Huobi 
+20k  @29,100      - $1.4
+`
+
+Positions can be viewed as a summary or aggregated by one of the below categories:";
+        }
+        private async Task<string> GetPositionsShortText()
+        {
+            return
+@"*Top 5 Short Positions*
+`
+🟥🟥🟥 SHORTS 🟥🟥🟥
+
+▲ BTCUSDT_Perp    BitMEX 
+20k  @29,100      + $412
+
+▼ AACEUSDC_Coin   Huobi 
+20k  @29,100      - $1.4
+
+▲ XBTUSD        BitMEX 
+20k  @29,100    + $45k
+
+▼ ETHUSD        Binance 
+1.6m  @2,100    - $105k
+`
+
+Positions can be viewed as a summary or aggregated by one of the below categories:";
+        }
+        private async Task<string> GetPositionsBySizeMessageText()
+        {
+            return
+@"*Positions by size*
+`
+ByBIT     : $14,918.51
+BitMEX    : $ 7,752.08
+Binance   : $ 3,127.20
+
+Total       $25,813.87`
+
+Positions can be viewed as a summary or aggregated by one of the below categories:";
+        }
+        private async Task<string> GetPositionsByLiquidationDetailsMessageText()
+        {
+            string text = $"*Positions closest to liquidation*{Environment.NewLine}{Environment.NewLine}";
+            text += string.Join($"{Environment.NewLine}{Environment.NewLine}", await GetPositionsByLiquidationDetails());
+            text += $"{Environment.NewLine}{Environment.NewLine}";
+            text +=
+@"`Total            ($25,813.87)`
+
+Positions can be viewed as a summary or aggregated by one of the below categories:";
+            return text;
+        }
+        private async Task<List<Position>> GetPositionsByLiquidationDetails()
+        {
+            List<Position> positions = new List<Position>()
+            {
+                new Position()
+                {
+                    PositionId = 1,
+                    PositionText =
+@"`🏅XBTUSD
+Pr:30,200(USD)    Qt:200,000.15(USD)
+UPnL:0.0053(BTC)  Liq%:2.5
+Mark:30,500(USD)`",
+                },
+                new Position()
+                {
+                    PositionId = 2,
+                    PositionText =
+@"`🏅XBTUSD
+Pr:30,200(USD)    Qt:200,000.15(USD)
+UPnL:0.0053(BTC)  Liq%:5.9
+Mark:30,500(USD)`",
+                },
+                new Position()
+                {
+                    PositionId = 3,
+                    PositionText =
+@"`🏅XBTUSD
+Pr:30,200(USD)    Qt:200,000.15(USD)
+UPnL:0.0053(BTC)  Liq%:10.48
+Mark:30,500(USD)`",
+                },
+                new Position()
+                {
+                    PositionId = 4,
+                    PositionText =
+@"`🏅XBTUSD
+Pr:30,200(USD)    Qt:200,000.15(USD)
+UPnL:0.0053(BTC)  Liq%:23.15
+Mark:30,500(USD)`",
+                },
+            };
+
+            return positions;
+        }
+        private async Task<string> GetPositionsByWinLoseDetailsText()
+        {
+            return
+@"*Positions (Winners/Losers)*
+`
+Strat1_ByBIT     : $13,573.37
+Strat1_BitMEX    : $ 7,641.41
+Strat1_BINANANCE : $ 3,127.20
+PA_Trading_Bybit : $ 1,345.14
+PA_Trading_Bi... : $   110.67
+
+Total              $25,813.87`
+
+Positions can be viewed as a summary or aggregated by one of the below categories:";
+        }
+        private async Task<string> GetPositionsByLongShortDetailsMessageText()
+        {
+            return
+@"*Positions (Long/Short)*
+`
+ByBIT     : $14,918.51
+BitMEX    : $ 7,752.08
+Binance   : $ 3,127.20
+
+Total       $25,813.87`
+
+Positions can be viewed as a summary or aggregated by one of the below categories:";
+        }
+        private async Task<string> GetPositionsBySizeDetailsMessageText()
+        {
+            return
+@"*Positions by size*
+`
+ByBIT     : $14,918.51
+BitMEX    : $ 7,752.08
+Binance   : $ 3,127.20
+
+Total       $25,813.87`
+
+Positions can be viewed as a summary or aggregated by one of the below categories:";
         }
     }
 
@@ -724,6 +1368,10 @@ View breakdown by:";
         {
             await Client.SendMessageAsync(chat.Id, "Orders coming soon...");
         }
+
+        public override async Task CleanUp(long chatId)
+        {
+        }
     }
 
     public class ExposuresTelegramController : BaseTelegramController
@@ -746,6 +1394,10 @@ View breakdown by:";
         public override async Task RunInitCommand(Chat chat)
         {
             await Client.SendMessageAsync(chat.Id, "Exposures coming soon...");
+        }
+
+        public override async Task CleanUp(long chatId)
+        {
         }
     }
 
@@ -1039,6 +1691,12 @@ View breakdown by:";
             tradePoco.MainMessageId = message.MessageId;
             UpdateLastUsedTradePocoPerChatId(chat.Id, tradePoco);
         }
+
+        public override async Task CleanUp(long chatId)
+        {
+            if (_chatIdToLastUsedTradePoco.TryGetValue(chatId, out var poco))
+                await DeletePromptMessage(chatId, poco);
+        }
         #endregion
         private async Task UpdateMessageToQuantitySelection(CallbackQueryCallbackData data, TelegramTradePoco tradePoco, Telegram.BotAPI.AvailableTypes.Message message)
         {
@@ -1049,7 +1707,6 @@ View breakdown by:";
 
             await UpdateMessage(message, messageText, inlineButtonsMarkup);
         }
-
         private static InlineKeyboardMarkup CreateQuantityInputButtons()
         {
             List<InlineKeyboardButton> row1 = new()
@@ -1100,70 +1757,6 @@ View breakdown by:";
 
             await UpdateMessage(message, messageText, inlineButtonsMarkup);
         }
-
-        private async Task<Telegram.BotAPI.AvailableTypes.Message> MoveMessageToBottomIfNecessary(CallbackQuery update, TelegramTradePoco tradePoco)
-        {
-            if (!SWTelegramBot.IsLastUsedControllerForChat(update.Message.Chat.Id, this))
-            {
-                //await TryDeleteMessageAndRemoveFromDictionary(update.Message.Chat.Id, update.Message.MessageId);
-                //await Client.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
-                SendMessageArgs args = new(update.Message.Chat.Id, TelegramTextHelper.EscapeSpecialCharacters(update.Message.Text));
-                args.ParseMode = ParseMode.MarkdownV2;
-                args.ReplyMarkup = update.Message.ReplyMarkup;
-                var message = await Client.SendMessageAsync(args);
-                tradePoco.MainMessageId = message.MessageId;
-                try
-                {
-                    await Client.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
-                }
-                catch (Exception ex)
-                {
-                    //Log
-                }
-                if (_chatIdToMessageIdToTradePoco.TryGetValue(update.Message.Chat.Id, out var messageToTradePoco))
-                {
-                    if (messageToTradePoco.TryRemove(update.Message.MessageId, out var poco))
-                        messageToTradePoco.TryAdd(message.MessageId, poco);
-                }
-                return message;
-            }
-            return update.Message;
-        }
-
-        private static List<InlineKeyboardButton> CreateBackButtonRow(string backData)
-        {
-            return new()
-                {
-                    new("Back") {CallbackData =  new CallbackQueryCallbackData("trade/back", backData).ToString()},
-                };
-        }
-
-        private async Task UpdateMessage(Telegram.BotAPI.AvailableTypes.Message message, string? messageText, InlineKeyboardMarkup inlineButtonsMarkup)
-        {
-            if (string.IsNullOrWhiteSpace(messageText))
-            {
-                EditMessageReplyMarkup replyMarkup = new EditMessageReplyMarkup()
-                {
-                    ChatId = message.Chat.Id,
-                    MessageId = message.MessageId,
-                    ReplyMarkup = inlineButtonsMarkup
-                };
-                await Client.EditMessageReplyMarkupAsync(replyMarkup);
-            }
-            else
-                {
-                    EditMessageTextArgs textArgs = new(messageText)
-                    {
-                        ChatId = message.Chat.Id,
-                        MessageId = message.MessageId,
-                        ReplyMarkup = inlineButtonsMarkup,
-                        ParseMode = ParseMode.MarkdownV2,
-                    };
-
-                    await Client.EditMessageTextAsync(textArgs);
-                }
-        }
-
         private static InlineKeyboardMarkup GetPriceInputButtons()
         {
             List<InlineKeyboardButton> row1 = new()
@@ -1217,7 +1810,80 @@ View breakdown by:";
             InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
             return inlineButtonsMarkup;
         }
+        private string GetBaseTradeMessageText(TelegramTradePoco tradePoco)
+        {
+            return
+$@"*Trade*
 
+Use the buttons below to setup your order\. We'll show you the final summary before placing the order\.
+
+Account: {TelegramHelper.EscapeSpecialCharacters(tradePoco.AccountName ?? "")}
+Symbol: {TelegramHelper.EscapeSpecialCharacters(tradePoco.SymbolExchange ?? "")}
+Quantity: {TelegramHelper.EscapeSpecialCharacters(tradePoco.Quantity.ToString() ?? "")}
+Price: {TelegramHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ?? "")}
+";
+        }
+        private static List<InlineKeyboardButton> CreateBackButtonRow(string backData)
+        {
+            return new()
+                {
+                    new("🔙") {CallbackData =  new CallbackQueryCallbackData("trade/back", backData).ToString()},
+                };
+        }
+
+        private async Task<Telegram.BotAPI.AvailableTypes.Message> MoveMessageToBottomIfNecessary(CallbackQuery update, TelegramTradePoco tradePoco)
+        {
+            if (!SWTelegramBot.IsLastUsedControllerForChat(update.Message.Chat.Id, this))
+            {
+                //await TryDeleteMessageAndRemoveFromDictionary(update.Message.Chat.Id, update.Message.MessageId);
+                //await Client.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
+                SendMessageArgs args = new(update.Message.Chat.Id, TelegramHelper.EscapeSpecialCharacters(update.Message.Text));
+                args.ParseMode = ParseMode.MarkdownV2;
+                args.ReplyMarkup = update.Message.ReplyMarkup;
+                var message = await Client.SendMessageAsync(args);
+                tradePoco.MainMessageId = message.MessageId;
+                try
+                {
+                    await Client.DeleteMessageAsync(update.Message.Chat.Id, update.Message.MessageId);
+                }
+                catch (Exception ex)
+                {
+                    //Log
+                }
+                if (_chatIdToMessageIdToTradePoco.TryGetValue(update.Message.Chat.Id, out var messageToTradePoco))
+                {
+                    if (messageToTradePoco.TryRemove(update.Message.MessageId, out var poco))
+                        messageToTradePoco.TryAdd(message.MessageId, poco);
+                }
+                return message;
+            }
+            return update.Message;
+        }
+        private async Task UpdateMessage(Telegram.BotAPI.AvailableTypes.Message message, string? messageText, InlineKeyboardMarkup inlineButtonsMarkup)
+        {
+            if (string.IsNullOrWhiteSpace(messageText))
+            {
+                EditMessageReplyMarkup replyMarkup = new EditMessageReplyMarkup()
+                {
+                    ChatId = message.Chat.Id,
+                    MessageId = message.MessageId,
+                    ReplyMarkup = inlineButtonsMarkup
+                };
+                await Client.EditMessageReplyMarkupAsync(replyMarkup);
+            }
+            else
+                {
+                    EditMessageTextArgs textArgs = new(messageText)
+                    {
+                        ChatId = message.Chat.Id,
+                        MessageId = message.MessageId,
+                        ReplyMarkup = inlineButtonsMarkup,
+                        ParseMode = ParseMode.MarkdownV2,
+                    };
+
+                    await Client.EditMessageTextAsync(textArgs);
+                }
+        }
         private void UpdateLastUsedTradePocoPerChatId(long chatId, TelegramTradePoco tradePoco)
         {
             if (_chatIdToLastUsedTradePoco.TryGetValue(chatId, out var oldPoco))
@@ -1225,7 +1891,6 @@ View breakdown by:";
             else
                 _chatIdToLastUsedTradePoco.TryAdd(chatId, tradePoco);
         }
-
         private async Task DeletePromptMessage(long chatId, TelegramTradePoco tradePoco)
         {
             if (tradePoco.QtyPricePromptMessageId != null)
@@ -1240,20 +1905,6 @@ View breakdown by:";
                 }
                 tradePoco.QtyPricePromptMessageId = null;
             }
-        }
-
-        private string GetBaseTradeMessageText(TelegramTradePoco tradePoco)
-        {
-            return
-$@"*Trade*
-
-Use the buttons below to setup your order\. We'll show you the final summary before placing the order\.
-
-Account: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.AccountName ?? "")}
-Symbol: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.SymbolExchange ?? "")}
-Quantity: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Quantity.ToString() ?? "")}
-Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ?? "")}
-";
         }
     }
 
@@ -1278,21 +1929,22 @@ Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ??
         {
             await Client.SendMessageAsync(chat.Id, "Accounts coming soon...");
         }
+
+        public override async Task CleanUp(long chatId)
+        {
+        }
     }
 
+    public enum SettingsButtons
+    {
+        ShowPositionsActions,
+        AutoPing,
+        ShowUPnL,
+        ShowNAV,
+        ShowClosestToLiquidation
+    }
     public class SettingsTelegramController : BaseTelegramController
     {
-        ConcurrentDictionary<long, int> _chatIdToSettingsMessageId = new();
-
-        #region buttons
-        private const string _posShowActionsCallBackData = "posShowActions";
-        private const string _posSummaryViewCallBackData = "posSummaryView";
-        private const string _pingAutoPingCallBackData = "pingAutoPing";
-        private const string _pingShowUPnLCallBackData = "pingShowUPnL";
-        private const string _pingShowNAVCallBackData = "pingShowNAV";
-        private const string _pingShowClosestLiquidationPercentageCallBackData = "pingShowClosestLiquidationPercentage";
-        #endregion
-
         public SettingsTelegramController(BotClient client) : base(client) { }
 
         public override async Task HandleCallbackQuery(CallbackQuery update, string path, CallbackQueryCallbackData data)
@@ -1313,24 +1965,24 @@ Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ??
                 return;
             }
 
-            switch (data.Data)
+            if (!Enum.TryParse(data.Data, out SettingsButtons button))
+                return;
+
+            switch (button)
             {
-                case _posShowActionsCallBackData:
+                case SettingsButtons.ShowPositionsActions:
                     settings.Pos_ShowActionButtonsPerPosition = !settings.Pos_ShowActionButtonsPerPosition;
                     break;
-                case _posSummaryViewCallBackData:
-                    settings.Pos_SummaryView = !settings.Pos_SummaryView;
-                    break;
-                case _pingAutoPingCallBackData:
+                case SettingsButtons.AutoPing:
                     settings.Ping_AutoPing = !settings.Ping_AutoPing;
                     break;
-                case _pingShowUPnLCallBackData:
+                case SettingsButtons.ShowUPnL:
                     SetPingMetricFromClick(settings, PingMetric.UPnL);
                     break;
-                case _pingShowNAVCallBackData:
+                case SettingsButtons.ShowNAV:
                     SetPingMetricFromClick(settings, PingMetric.NAV);
                     break;
-                case _pingShowClosestLiquidationPercentageCallBackData:
+                case SettingsButtons.ShowClosestToLiquidation:
                     SetPingMetricFromClick(settings, PingMetric.ClosestToLiq);
                     break;
                 default:
@@ -1363,10 +2015,14 @@ Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ??
 
         public override async Task RunInitCommand(Chat chat)
         {
+            var settings = SWTelegramBot.TelegramSettingsPerChat.GetOrAdd(chat.Id, new TelegramSettings());
             try
             {
-                _chatIdToSettingsMessageId.TryRemove(chat.Id, out int messageId);
-                await Client.DeleteMessageAsync(chat.Id, messageId);
+                if (settings.SettingsMessageId.HasValue)
+                {
+                    await Client.DeleteMessageAsync(chat.Id, settings.SettingsMessageId.Value);
+                    settings.SettingsMessageId = null;
+                }
             }
             catch (Exception ex)
             {
@@ -1377,42 +2033,47 @@ Price: {TelegramTextHelper.EscapeSpecialCharacters(tradePoco.Price.ToString() ??
 
 Use the bottons below to toggle your settings";
 
-            var settings = SWTelegramBot.TelegramSettingsPerChat.GetOrAdd(chat.Id, new TelegramSettings());
             InlineKeyboardMarkup inlineButtonsMarkup = BuildSettingsButtons(settings);
             SendMessageArgs args = new(chat.Id, messageText);
             args.ParseMode = ParseMode.MarkdownV2;
             args.ReplyMarkup = inlineButtonsMarkup;
             var message = await Client.SendMessageAsync(args);
-            _chatIdToSettingsMessageId.TryAdd(message.Chat.Id, message.MessageId);
+            settings.SettingsMessageId = message.MessageId;
         }
 
-        private InlineKeyboardMarkup BuildSettingsButtons(TelegramSettings settings)
+        public override async Task CleanUp(long chatId)
         {
-            var actionsEmoji = TelegramTextHelper.GetBoolEmoji(settings.Pos_ShowActionButtonsPerPosition);
-            var summaryEmoji = TelegramTextHelper.GetBoolEmoji(settings.Pos_SummaryView);
-            var posShowActions = new InlineKeyboardButton($"Show Actions {actionsEmoji}") { CallbackData = new CallbackQueryCallbackData("settings", _posShowActionsCallBackData).ToString() };
-            var posSummaryView = new InlineKeyboardButton($"Summary View {summaryEmoji}") { CallbackData = new CallbackQueryCallbackData("settings", _posSummaryViewCallBackData).ToString() };
+        }
+        public static async Task UpdateSettingsMessage(BotClient client, long chatId, TelegramSettings settings)
+        {
+            if (!settings.SettingsMessageId.HasValue)
+                return;
 
+            InlineKeyboardMarkup inlineButtonsMarkup = BuildSettingsButtons(settings);
+            var editMessageArgs = new EditMessageReplyMarkup()
+            {
+                ChatId = chatId,
+                MessageId = settings.SettingsMessageId.Value,
+                ReplyMarkup = inlineButtonsMarkup,
+            };
+            await client.EditMessageReplyMarkupAsync(editMessageArgs);
+        }
+        private static InlineKeyboardMarkup BuildSettingsButtons(TelegramSettings settings)
+        {
             List<InlineKeyboardButton> row1 = new()
             {
-                posShowActions, posSummaryView
+                BuildSettingsButton(settings, SettingsButtons.ShowPositionsActions)
             };
 
-            var pingAutoEmojie = TelegramTextHelper.GetBoolEmoji(settings.Ping_AutoPing);
-            var pingAutoPing = new InlineKeyboardButton($"Auto Ping {pingAutoEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", _pingAutoPingCallBackData).ToString() };
             List<InlineKeyboardButton> row2 = new()
             {
-                pingAutoPing
+                BuildSettingsButton(settings, SettingsButtons.AutoPing)
             };
-            var pingShowUPnLEmojie = TelegramTextHelper.GetBoolEmoji(settings.Ping_MetricToShow == PingMetric.UPnL);
-            var pingShowNAVEmojie = TelegramTextHelper.GetBoolEmoji(settings.Ping_MetricToShow == PingMetric.NAV);
-            var pingShowCLosestToLiqEmojie = TelegramTextHelper.GetBoolEmoji(settings.Ping_MetricToShow == PingMetric.ClosestToLiq);
-            var pingShowUPnL = new InlineKeyboardButton($"Show UPnL {pingShowUPnLEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", _pingShowUPnLCallBackData).ToString() };
-            var pingShowNAV = new InlineKeyboardButton($"Show NAV {pingShowNAVEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", _pingShowNAVCallBackData).ToString() };
-            var pingShowClosestLiq = new InlineKeyboardButton($"Show Closest Liq% {pingShowCLosestToLiqEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", _pingShowClosestLiquidationPercentageCallBackData).ToString() };
             List<InlineKeyboardButton> row3 = new()
             {
-                pingShowUPnL, pingShowNAV, pingShowClosestLiq
+                BuildSettingsButton(settings, SettingsButtons.ShowUPnL),
+                BuildSettingsButton(settings, SettingsButtons.ShowNAV),
+                BuildSettingsButton(settings, SettingsButtons.ShowClosestToLiquidation),
             };
 
             List<List<InlineKeyboardButton>> inlineButtons = new()
@@ -1425,6 +2086,37 @@ Use the bottons below to toggle your settings";
 
             InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(inlineButtons.ToArray());
             return inlineButtonsMarkup;
+        }
+
+        private static InlineKeyboardButton BuildSettingsButton(TelegramSettings settings, SettingsButtons buttonToBuild)
+        {
+            InlineKeyboardButton? button = null;
+            switch (buttonToBuild)
+            {
+                case SettingsButtons.ShowPositionsActions:
+                    var actionsEmoji = TelegramHelper.GetBoolEmoji(settings.Pos_ShowActionButtonsPerPosition);
+                    button = new InlineKeyboardButton($"Show Actions {actionsEmoji}") { CallbackData = new CallbackQueryCallbackData("settings", SettingsButtons.ShowPositionsActions.ToString()).ToString() };
+                    break;
+                case SettingsButtons.AutoPing:
+                    var pingAutoEmojie = TelegramHelper.GetBoolEmoji(settings.Ping_AutoPing);
+                    button = new InlineKeyboardButton($"Auto Ping {pingAutoEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", SettingsButtons.AutoPing.ToString()).ToString() };
+                    break;
+                case SettingsButtons.ShowUPnL:
+                    var pingShowUPnLEmojie = TelegramHelper.GetBoolEmoji(settings.Ping_MetricToShow == PingMetric.UPnL);
+                    button = new InlineKeyboardButton($"Show UPnL {pingShowUPnLEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", SettingsButtons.ShowUPnL.ToString()).ToString() };
+                    break;
+                case SettingsButtons.ShowNAV:
+                    var pingShowNAVEmojie = TelegramHelper.GetBoolEmoji(settings.Ping_MetricToShow == PingMetric.NAV);
+                    button = new InlineKeyboardButton($"Show NAV {pingShowNAVEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", SettingsButtons.ShowNAV.ToString()).ToString() };
+                    break;
+                case SettingsButtons.ShowClosestToLiquidation:
+                    var pingShowCLosestToLiqEmojie = TelegramHelper.GetBoolEmoji(settings.Ping_MetricToShow == PingMetric.ClosestToLiq);
+                    button = new InlineKeyboardButton($"Show Closest Liq% {pingShowCLosestToLiqEmojie}") { CallbackData = new CallbackQueryCallbackData("settings", SettingsButtons.ShowClosestToLiquidation.ToString()).ToString() };
+                    break;
+                default:
+                    break;
+            }
+            return button;
         }
     }
 
@@ -1440,14 +2132,14 @@ Use the bottons below to toggle your settings";
     }
     public class TelegramSettings
     {
+        public int? SettingsMessageId { get; set; }
         #region Pings
         public bool Ping_AutoPing { get; set; }
         public PingMetric Ping_MetricToShow { get; set; }
         public int? PingMessageId { get; set; }
         #endregion
-        #region positions
+        #region Positions
         public bool Pos_ShowActionButtonsPerPosition { get; set; }
-        public bool Pos_SummaryView { get; set; }
         #endregion
     }
 
@@ -1472,7 +2164,7 @@ Use the bottons below to toggle your settings";
         public List<long> UserIds { get; set; } = new();
     }
 
-    public static class TelegramTextHelper
+    public static class TelegramHelper
     {
         public static string GetBoolEmoji(bool val)
         {
@@ -1483,7 +2175,17 @@ Use the bottons below to toggle your settings";
         }
         public static string EscapeSpecialCharacters(string input)
         {
-            return input.Replace("_", @"\_").Replace(".", @"\.");
+            return input.Replace("_", @"\_").Replace(".", @"\.").Replace("#", @"\#").Replace("-", @"\-").Replace("(", @"\(").Replace(")", @"\)");
+        }
+        public static SendMessageArgs BuildSendMessageArgs(long chatId, string messageText, List<List<InlineKeyboardButton>> keyboardButtons)
+        {
+            InlineKeyboardMarkup inlineButtonsMarkup = new InlineKeyboardMarkup(keyboardButtons.ToArray());
+            SendMessageArgs args = new(chatId, EscapeSpecialCharacters(messageText))
+            {
+                ParseMode = ParseMode.MarkdownV2,
+                ReplyMarkup = inlineButtonsMarkup
+            };
+            return args;
         }
     }
 
